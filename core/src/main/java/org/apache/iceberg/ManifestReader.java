@@ -49,10 +49,10 @@ import static org.apache.iceberg.expressions.Expressions.alwaysTrue;
 public class ManifestReader extends CloseableGroup implements Filterable<FilteredManifest> {
   private static final Logger LOG = LoggerFactory.getLogger(ManifestReader.class);
 
-  private static final List<String> ALL_COLUMNS = ImmutableList.of("*");
-  static final List<String> CHANGE_COLUMNS = ImmutableList.of(
+  private static final ImmutableList<String> ALL_COLUMNS = ImmutableList.of("*");
+  static final ImmutableList<String> CHANGE_COLUMNS = ImmutableList.of(
       "file_path", "file_format", "partition", "record_count", "file_size_in_bytes");
-  static final List<String> CHANGE_WITH_STATS_COLUMNS = ImmutableList.<String>builder()
+  static final ImmutableList<String> CHANGE_WITH_STATS_COLUMNS = ImmutableList.<String>builder()
       .addAll(CHANGE_COLUMNS)
       .add("value_counts", "null_value_counts", "lower_bounds", "upper_bounds")
       .build();
@@ -152,6 +152,7 @@ public class ManifestReader extends CloseableGroup implements Filterable<Filtere
     return new FilteredManifest(this, alwaysTrue(), expr, fileSchema, ALL_COLUMNS, true);
   }
 
+  @Override
   public FilteredManifest caseSensitive(boolean caseSensitive) {
     return new FilteredManifest(this, alwaysTrue(), alwaysTrue(), fileSchema, ALL_COLUMNS, caseSensitive);
   }
