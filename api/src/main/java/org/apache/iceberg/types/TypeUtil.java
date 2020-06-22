@@ -19,13 +19,6 @@
 
 package org.apache.iceberg.types;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -34,6 +27,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 
 public class TypeUtil {
 
@@ -94,6 +94,10 @@ public class TypeUtil {
 
   public static Map<Integer, Types.NestedField> indexById(Types.StructType struct) {
     return visit(struct, new IndexById());
+  }
+
+  public static Map<Integer, Integer> indexParents(Types.StructType struct) {
+    return ImmutableMap.copyOf(visit(struct, new IndexParents()));
   }
 
   /**
@@ -190,7 +194,35 @@ public class TypeUtil {
   }
 
   public static class SchemaVisitor<T> {
-    private final Deque<Integer> fieldIds = Lists.newLinkedList();
+    public void beforeField(Types.NestedField field) {
+    }
+
+    public void afterField(Types.NestedField field) {
+    }
+
+    public void beforeListElement(Types.NestedField elementField) {
+      beforeField(elementField);
+    }
+
+    public void afterListElement(Types.NestedField elementField) {
+      afterField(elementField);
+    }
+
+    public void beforeMapKey(Types.NestedField keyField) {
+      beforeField(keyField);
+    }
+
+    public void afterMapKey(Types.NestedField keyField) {
+      afterField(keyField);
+    }
+
+    public void beforeMapValue(Types.NestedField valueField) {
+      beforeField(valueField);
+    }
+
+    public void afterMapValue(Types.NestedField valueField) {
+      afterField(valueField);
+    }
 
     public T schema(Schema schema, T structResult) {
       return null;
@@ -215,10 +247,6 @@ public class TypeUtil {
     public T primitive(Type.PrimitiveType primitive) {
       return null;
     }
-
-    protected Deque<Integer> fieldIds() {
-      return fieldIds;
-    }
   }
 
   public static <T> T visit(Schema schema, SchemaVisitor<T> visitor) {
@@ -231,12 +259,12 @@ public class TypeUtil {
         Types.StructType struct = type.asNestedType().asStructType();
         List<T> results = Lists.newArrayListWithExpectedSize(struct.fields().size());
         for (Types.NestedField field : struct.fields()) {
-          visitor.fieldIds.push(field.fieldId());
+          visitor.beforeField(field);
           T result;
           try {
             result = visit(field.type(), visitor);
           } finally {
-            visitor.fieldIds.pop();
+            visitor.afterField(field);
           }
           results.add(visitor.field(field, result));
         }
@@ -246,11 +274,12 @@ public class TypeUtil {
         Types.ListType list = type.asNestedType().asListType();
         T elementResult;
 
-        visitor.fieldIds.push(list.elementId());
+        Types.NestedField elementField = list.field(list.elementId());
+        visitor.beforeListElement(elementField);
         try {
           elementResult = visit(list.elementType(), visitor);
         } finally {
-          visitor.fieldIds.pop();
+          visitor.afterListElement(elementField);
         }
 
         return visitor.list(list, elementResult);
@@ -260,18 +289,20 @@ public class TypeUtil {
         T keyResult;
         T valueResult;
 
-        visitor.fieldIds.push(map.keyId());
+        Types.NestedField keyField = map.field(map.keyId());
+        visitor.beforeMapKey(keyField);
         try {
           keyResult = visit(map.keyType(), visitor);
         } finally {
-          visitor.fieldIds.pop();
+          visitor.afterMapKey(keyField);
         }
 
-        visitor.fieldIds.push(map.valueId());
+        Types.NestedField valueField = map.field(map.valueId());
+        visitor.beforeMapValue(valueField);
         try {
           valueResult = visit(map.valueType(), visitor);
         } finally {
-          visitor.fieldIds.pop();
+          visitor.afterMapValue(valueField);
         }
 
         return visitor.map(map, keyResult, valueResult);
@@ -389,7 +420,7 @@ public class TypeUtil {
     return MAX_PRECISION[numBytes];
   }
 
-  public static int decimalRequriedBytes(int precision) {
+  public static int decimalRequiredBytes(int precision) {
     Preconditions.checkArgument(precision >= 0 && precision < 40,
         "Unsupported decimal precision: %s", precision);
     return REQUIRED_LENGTH[precision];

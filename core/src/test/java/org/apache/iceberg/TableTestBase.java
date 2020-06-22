@@ -19,17 +19,20 @@
 
 package org.apache.iceberg;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterators;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
-import com.google.common.io.Files;
 import java.io.File;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.LongStream;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterators;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.relocated.com.google.common.io.Files;
 import org.apache.iceberg.types.Types;
 import org.junit.After;
 import org.junit.Assert;
@@ -37,7 +40,6 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.rules.TemporaryFolder;
 
-import static org.apache.iceberg.Files.localInput;
 import static org.apache.iceberg.types.Types.NestedField.required;
 
 public class TableTestBase {
@@ -54,28 +56,30 @@ public class TableTestBase {
 
   static final DataFile FILE_A = DataFiles.builder(SPEC)
       .withPath("/path/to/data-a.parquet")
-      .withFileSizeInBytes(0)
+      .withFileSizeInBytes(10)
       .withPartitionPath("data_bucket=0") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
   static final DataFile FILE_B = DataFiles.builder(SPEC)
       .withPath("/path/to/data-b.parquet")
-      .withFileSizeInBytes(0)
+      .withFileSizeInBytes(10)
       .withPartitionPath("data_bucket=1") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
   static final DataFile FILE_C = DataFiles.builder(SPEC)
       .withPath("/path/to/data-c.parquet")
-      .withFileSizeInBytes(0)
+      .withFileSizeInBytes(10)
       .withPartitionPath("data_bucket=2") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
   static final DataFile FILE_D = DataFiles.builder(SPEC)
       .withPath("/path/to/data-d.parquet")
-      .withFileSizeInBytes(0)
+      .withFileSizeInBytes(10)
       .withPartitionPath("data_bucket=3") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
+
+  static final FileIO FILE_IO = new TestTables.LocalFileIO();
 
   @Rule
   public TemporaryFolder temp = new TemporaryFolder();
@@ -83,6 +87,18 @@ public class TableTestBase {
   File tableDir = null;
   File metadataDir = null;
   public TestTables.TestTable table = null;
+
+  protected final int formatVersion;
+  @SuppressWarnings("checkstyle:MemberName")
+  protected final Assertions V1Assert;
+  @SuppressWarnings("checkstyle:MemberName")
+  protected final Assertions V2Assert;
+
+  public TableTestBase(int formatVersion) {
+    this.formatVersion = formatVersion;
+    this.V1Assert = new Assertions(1, formatVersion);
+    this.V2Assert = new Assertions(2, formatVersion);
+  }
 
   @Before
   public void setupTable() throws Exception {
@@ -107,8 +123,8 @@ public class TableTestBase {
         !name.startsWith("snap") && Files.getFileExtension(name).equalsIgnoreCase("avro")));
   }
 
-  private TestTables.TestTable create(Schema schema, PartitionSpec spec) {
-    return TestTables.create(tableDir, "test", schema, spec);
+  TestTables.TestTable create(Schema schema, PartitionSpec spec) {
+    return TestTables.create(tableDir, "test", schema, spec, formatVersion);
   }
 
   TestTables.TestTable load() {
@@ -124,11 +140,15 @@ public class TableTestBase {
   }
 
   ManifestFile writeManifest(DataFile... files) throws IOException {
+    return writeManifest(null, files);
+  }
+
+  ManifestFile writeManifest(Long snapshotId, DataFile... files) throws IOException {
     File manifestFile = temp.newFile("input.m0.avro");
     Assert.assertTrue(manifestFile.delete());
     OutputFile outputFile = table.ops().io().newOutputFile(manifestFile.getCanonicalPath());
 
-    ManifestWriter writer = ManifestWriter.write(table.spec(), outputFile);
+    ManifestWriter<DataFile> writer = ManifestFiles.write(formatVersion, table.spec(), outputFile, snapshotId);
     try {
       for (DataFile file : files) {
         writer.add(file);
@@ -140,15 +160,32 @@ public class TableTestBase {
     return writer.toManifestFile();
   }
 
-  ManifestFile writeManifest(String fileName, ManifestEntry... entries) throws IOException {
+  ManifestFile writeManifest(String fileName, ManifestEntry<?>... entries) throws IOException {
+    return writeManifest(null, fileName, entries);
+  }
+
+  ManifestFile writeManifest(Long snapshotId, ManifestEntry<?>... entries) throws IOException {
+    return writeManifest(snapshotId, "input.m0.avro", entries);
+  }
+
+  @SuppressWarnings("unchecked")
+  <F extends ContentFile<F>> ManifestFile writeManifest(Long snapshotId, String fileName, ManifestEntry<?>... entries)
+      throws IOException {
     File manifestFile = temp.newFile(fileName);
     Assert.assertTrue(manifestFile.delete());
     OutputFile outputFile = table.ops().io().newOutputFile(manifestFile.getCanonicalPath());
 
-    ManifestWriter writer = ManifestWriter.write(table.spec(), outputFile);
+    ManifestWriter<F> writer;
+    if (entries[0].file() instanceof DataFile) {
+      writer = (ManifestWriter<F>) ManifestFiles.write(
+          formatVersion, table.spec(), outputFile, snapshotId);
+    } else {
+      writer = (ManifestWriter<F>) ManifestFiles.writeDeleteManifest(
+          formatVersion, table.spec(), outputFile, snapshotId);
+    }
     try {
-      for (ManifestEntry entry : entries) {
-        writer.addEntry(entry);
+      for (ManifestEntry<?> entry : entries) {
+        writer.addEntry((ManifestEntry<F>) entry);
       }
     } finally {
       writer.close();
@@ -157,13 +194,30 @@ public class TableTestBase {
     return writer.toManifestFile();
   }
 
-  ManifestEntry manifestEntry(ManifestEntry.Status status, long snapshotId, DataFile file) {
-    ManifestEntry entry = new ManifestEntry(table.spec().partitionType());
+  ManifestFile writeManifestWithName(String name, DataFile... files) throws IOException {
+    File manifestFile = temp.newFile(name + ".avro");
+    Assert.assertTrue(manifestFile.delete());
+    OutputFile outputFile = table.ops().io().newOutputFile(manifestFile.getCanonicalPath());
+
+    ManifestWriter<DataFile> writer = ManifestFiles.write(formatVersion, table.spec(), outputFile, null);
+    try {
+      for (DataFile file : files) {
+        writer.add(file);
+      }
+    } finally {
+      writer.close();
+    }
+
+    return writer.toManifestFile();
+  }
+
+  ManifestEntry<DataFile> manifestEntry(ManifestEntry.Status status, Long snapshotId, DataFile file) {
+    GenericManifestEntry<DataFile> entry = new GenericManifestEntry<>(table.spec().partitionType());
     switch (status) {
       case ADDED:
         return entry.wrapAppend(snapshotId, file);
       case EXISTING:
-        return entry.wrapExisting(snapshotId, file);
+        return entry.wrapExisting(snapshotId, 0L, file);
       case DELETED:
         return entry.wrapDelete(snapshotId, file);
       default:
@@ -172,10 +226,21 @@ public class TableTestBase {
   }
 
   void validateSnapshot(Snapshot old, Snapshot snap, DataFile... newFiles) {
-    List<ManifestFile> oldManifests = old != null ? old.manifests() : ImmutableList.of();
+    validateSnapshot(old, snap, null, newFiles);
+  }
+
+  void validateSnapshot(Snapshot old, Snapshot snap, long sequenceNumber, DataFile... newFiles) {
+    validateSnapshot(old, snap, (Long) sequenceNumber, newFiles);
+  }
+
+  void validateSnapshot(Snapshot old, Snapshot snap, Long sequenceNumber, DataFile... newFiles) {
+    Assert.assertEquals("Should not change delete manifests",
+        old != null ? Sets.newHashSet(old.deleteManifests()) : ImmutableSet.of(),
+        Sets.newHashSet(snap.deleteManifests()));
+    List<ManifestFile> oldManifests = old != null ? old.dataManifests() : ImmutableList.of();
 
     // copy the manifests to a modifiable list and remove the existing manifests
-    List<ManifestFile> newManifests = Lists.newArrayList(snap.manifests());
+    List<ManifestFile> newManifests = Lists.newArrayList(snap.dataManifests());
     for (ManifestFile oldManifest : oldManifests) {
       Assert.assertTrue("New snapshot should contain old manifests",
           newManifests.remove(oldManifest));
@@ -188,10 +253,14 @@ public class TableTestBase {
     long id = snap.snapshotId();
     Iterator<String> newPaths = paths(newFiles).iterator();
 
-    for (ManifestEntry entry : ManifestReader.read(localInput(manifest.path())).entries()) {
+    for (ManifestEntry<DataFile> entry : ManifestFiles.read(manifest, FILE_IO).entries()) {
       DataFile file = entry.file();
+      if (sequenceNumber != null) {
+        V1Assert.assertEquals("Sequence number should default to 0", 0, entry.sequenceNumber().longValue());
+        V2Assert.assertEquals("Sequence number should match expected", sequenceNumber, entry.sequenceNumber());
+      }
       Assert.assertEquals("Path should match expected", newPaths.next(), file.path().toString());
-      Assert.assertEquals("File's snapshot ID should match", id, entry.snapshotId());
+      Assert.assertEquals("File's snapshot ID should match", id, (long) entry.snapshotId());
     }
 
     Assert.assertFalse("Should find all files in the manifest", newPaths.hasNext());
@@ -217,22 +286,39 @@ public class TableTestBase {
     return paths;
   }
 
-  static void validateManifest(ManifestFile manifest,
-                               Iterator<Long> ids,
-                               Iterator<DataFile> expectedFiles) {
-    validateManifest(manifest.path(), ids, expectedFiles);
+  void validateManifest(ManifestFile manifest,
+                        Iterator<Long> ids,
+                        Iterator<DataFile> expectedFiles) {
+    validateManifest(manifest, null, ids, expectedFiles, null);
   }
 
-  static void validateManifest(String manifest,
-                               Iterator<Long> ids,
-                               Iterator<DataFile> expectedFiles) {
-    for (ManifestEntry entry : ManifestReader.read(localInput(manifest)).entries()) {
+  void validateManifest(ManifestFile manifest,
+                        Iterator<Long> seqs,
+                        Iterator<Long> ids,
+                        Iterator<DataFile> expectedFiles) {
+    validateManifest(manifest, seqs, ids, expectedFiles, null);
+  }
+
+  void validateManifest(ManifestFile manifest,
+                        Iterator<Long> seqs,
+                        Iterator<Long> ids,
+                        Iterator<DataFile> expectedFiles,
+                        Iterator<ManifestEntry.Status> statuses) {
+    for (ManifestEntry<DataFile> entry : ManifestFiles.read(manifest, FILE_IO).entries()) {
       DataFile file = entry.file();
       DataFile expected = expectedFiles.next();
+      if (seqs != null) {
+        V1Assert.assertEquals("Sequence number should default to 0", 0, entry.sequenceNumber().longValue());
+        V2Assert.assertEquals("Sequence number should match expected", seqs.next(), entry.sequenceNumber());
+      }
       Assert.assertEquals("Path should match expected",
           expected.path().toString(), file.path().toString());
       Assert.assertEquals("Snapshot ID should match expected ID",
-          (long) ids.next(), entry.snapshotId());
+          ids.next(), entry.snapshotId());
+      if (statuses != null) {
+        Assert.assertEquals("Status should match expected",
+            statuses.next(), entry.status());
+      }
     }
 
     Assert.assertFalse("Should find all files in the manifest", expectedFiles.hasNext());
@@ -242,21 +328,14 @@ public class TableTestBase {
                                       Iterator<Long> ids,
                                       Iterator<DataFile> expectedFiles,
                                       Iterator<ManifestEntry.Status> expectedStatuses) {
-    validateManifestEntries(manifest.path(), ids, expectedFiles, expectedStatuses);
-  }
-
-  static void validateManifestEntries(String manifest,
-                                      Iterator<Long> ids,
-                                      Iterator<DataFile> expectedFiles,
-                                      Iterator<ManifestEntry.Status> expectedStatuses) {
-    for (ManifestEntry entry : ManifestReader.read(localInput(manifest)).entries()) {
+    for (ManifestEntry<DataFile> entry : ManifestFiles.read(manifest, FILE_IO).entries()) {
       DataFile file = entry.file();
       DataFile expected = expectedFiles.next();
       final ManifestEntry.Status expectedStatus = expectedStatuses.next();
       Assert.assertEquals("Path should match expected",
           expected.path().toString(), file.path().toString());
       Assert.assertEquals("Snapshot ID should match expected ID",
-          (long) ids.next(), entry.snapshotId());
+          ids.next(), entry.snapshotId());
       Assert.assertEquals("Entry status should match expected ID",
           expectedStatus, entry.status());
     }
@@ -268,6 +347,10 @@ public class TableTestBase {
     return Iterators.forArray(statuses);
   }
 
+  static Iterator<Long> seqs(long... seqs) {
+    return LongStream.of(seqs).iterator();
+  }
+
   static Iterator<Long> ids(Long... ids) {
     return Iterators.forArray(ids);
   }
@@ -277,6 +360,35 @@ public class TableTestBase {
   }
 
   static Iterator<DataFile> files(ManifestFile manifest) {
-    return ManifestReader.read(localInput(manifest.path())).iterator();
+    return ManifestFiles.read(manifest, FILE_IO).iterator();
+  }
+
+  /**
+   * Used for assertions that only apply if the table version is v2.
+   */
+  protected static class Assertions {
+    private final boolean enabled;
+
+    private Assertions(int validForVersion, int formatVersion) {
+      this.enabled = validForVersion == formatVersion;
+    }
+
+    void assertEquals(String context, int expected, int actual) {
+      if (enabled) {
+        Assert.assertEquals(context, expected, actual);
+      }
+    }
+
+    void assertEquals(String context, long expected, long actual) {
+      if (enabled) {
+        Assert.assertEquals(context, expected, actual);
+      }
+    }
+
+    void assertEquals(String context, Object expected, Object actual) {
+      if (enabled) {
+        Assert.assertEquals(context, expected, actual);
+      }
+    }
   }
 }

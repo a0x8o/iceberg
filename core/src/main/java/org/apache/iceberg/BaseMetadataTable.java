@@ -19,12 +19,12 @@
 
 package org.apache.iceberg;
 
-import com.google.common.collect.ImmutableMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 
 abstract class BaseMetadataTable implements Table {
   private PartitionSpec spec = PartitionSpec.unpartitioned();
@@ -35,6 +35,11 @@ abstract class BaseMetadataTable implements Table {
   @Override
   public FileIO io() {
     return table().io();
+  }
+
+  @Override
+  public String location() {
+    return table().location();
   }
 
   @Override
@@ -140,6 +145,11 @@ abstract class BaseMetadataTable implements Table {
   @Override
   public Rollback rollback() {
     throw new UnsupportedOperationException("Cannot roll back a metadata table");
+  }
+
+  @Override
+  public ManageSnapshots manageSnapshots() {
+    throw new UnsupportedOperationException("Cannot manage snapshots in a metadata table");
   }
 
   @Override

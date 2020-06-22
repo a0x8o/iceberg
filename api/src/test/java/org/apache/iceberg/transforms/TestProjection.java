@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.transforms;
 
-import com.google.common.collect.Lists;
 import java.util.List;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -30,6 +29,7 @@ import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Or;
 import org.apache.iceberg.expressions.Projections;
 import org.apache.iceberg.expressions.UnboundPredicate;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
 import org.junit.Assert;
 import org.junit.Test;
@@ -79,9 +79,9 @@ public class TestProjection {
           "id", projected.ref().name());
       Assert.assertEquals("Operation should match", bound.op(), projected.op());
 
-      if (bound.literal() != null) {
+      if (bound.isLiteralPredicate()) {
         Assert.assertEquals("Literal should be equal",
-            bound.literal().value(), projected.literal().value());
+            bound.asLiteralPredicate().literal().value(), projected.literal().value());
       } else {
         Assert.assertNull("Literal should be null", projected.literal());
       }
@@ -117,9 +117,9 @@ public class TestProjection {
           "id", projected.ref().name());
       Assert.assertEquals("Operation should match", bound.op(), projected.op());
 
-      if (bound.literal() != null) {
+      if (bound.isLiteralPredicate()) {
         Assert.assertEquals("Literal should be equal",
-            bound.literal().value(), projected.literal().value());
+            bound.asLiteralPredicate().literal().value(), projected.literal().value());
       } else {
         Assert.assertNull("Literal should be null", projected.literal());
       }
@@ -168,9 +168,9 @@ public class TestProjection {
           "id", projected.ref().name());
       Assert.assertEquals("Operation should match", bound.op(), projected.op());
 
-      if (bound.literal() != null) {
+      if (bound.isLiteralPredicate()) {
         Assert.assertEquals("Literal should be equal",
-            bound.literal().value(), projected.literal().value());
+            bound.asLiteralPredicate().literal().value(), projected.literal().value());
       } else {
         Assert.assertNull("Literal should be null", projected.literal());
       }
@@ -206,9 +206,9 @@ public class TestProjection {
           "id", projected.ref().name());
       Assert.assertEquals("Operation should match", bound.op(), projected.op());
 
-      if (bound.literal() != null) {
+      if (bound.isLiteralPredicate()) {
         Assert.assertEquals("Literal should be equal",
-            bound.literal().value(), projected.literal().value());
+            bound.asLiteralPredicate().literal().value(), projected.literal().value());
       } else {
         Assert.assertNull("Literal should be null", projected.literal());
       }

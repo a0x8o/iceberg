@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.spark.source;
 
-import com.google.common.collect.Maps;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -29,6 +28,7 @@ import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.StructLike;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.spark.SparkSchemaUtil;
 import org.apache.iceberg.transforms.Transform;
 import org.apache.iceberg.types.Type;
@@ -48,7 +48,7 @@ class PartitionKey implements StructLike {
   private final Accessor<InternalRow>[] accessors;
 
   @SuppressWarnings("unchecked")
-  PartitionKey(PartitionSpec spec) {
+  PartitionKey(PartitionSpec spec, Schema inputSchema) {
     this.spec = spec;
 
     List<PartitionField> fields = spec.fields();
@@ -58,7 +58,7 @@ class PartitionKey implements StructLike {
     this.accessors = (Accessor<InternalRow>[]) Array.newInstance(Accessor.class, size);
 
     Schema schema = spec.schema();
-    Map<Integer, Accessor<InternalRow>> newAccessors = buildAccessors(schema);
+    Map<Integer, Accessor<InternalRow>> newAccessors = buildAccessors(inputSchema);
     for (int i = 0; i < size; i += 1) {
       PartitionField field = fields.get(i);
       Accessor<InternalRow> accessor = newAccessors.get(field.sourceId());
@@ -182,7 +182,7 @@ class PartitionKey implements StructLike {
     if (isOptional) {
       // the wrapped position handles null layers
       return new WrappedPositionAccessor(position, size, accessor);
-    } else if (accessor instanceof PositionAccessor) {
+    } else if (accessor.getClass() == PositionAccessor.class) {
       return new Position2Accessor(position, size, (PositionAccessor) accessor);
     } else if (accessor instanceof Position2Accessor) {
       return new Position3Accessor(position, size, (Position2Accessor) accessor);

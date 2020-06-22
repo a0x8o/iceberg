@@ -204,7 +204,7 @@ public class SparkOrcWriter implements OrcValueWriter<InternalRow> {
     }
   }
 
-  static class TimestampConverter implements Converter {
+  static class TimestampTzConverter implements Converter {
     @Override
     public void addValue(int rowId, int column, SpecializedGetters data,
                          ColumnVector output) {
@@ -215,13 +215,8 @@ public class SparkOrcWriter implements OrcValueWriter<InternalRow> {
         output.isNull[rowId] = false;
         TimestampColumnVector cv = (TimestampColumnVector) output;
         long micros = data.getLong(column);
-        cv.time[rowId] = (micros / 1_000_000) * 1000;
-        int nanos = (int) (micros % 1_000_000) * 1000;
-        if (nanos < 0) {
-          nanos += 1_000_000_000;
-          cv.time[rowId] -= 1000;
-        }
-        cv.nanos[rowId] = nanos;
+        cv.time[rowId] = micros / 1_000; // millis
+        cv.nanos[rowId] = (int) (micros % 1_000_000) * 1_000; // nanos
       }
     }
   }
@@ -396,8 +391,8 @@ public class SparkOrcWriter implements OrcValueWriter<InternalRow> {
         return schema.getPrecision() <= 18 ?
             new Decimal18Converter(schema) :
             new Decimal38Converter(schema);
-      case TIMESTAMP:
-        return new TimestampConverter();
+      case TIMESTAMP_INSTANT:
+        return new TimestampTzConverter();
       case STRUCT:
         return new StructConverter(schema);
       case LIST:

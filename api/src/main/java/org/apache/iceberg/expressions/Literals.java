@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.expressions;
 
-import com.google.common.base.Preconditions;
 import java.io.ObjectStreamException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -35,6 +34,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.Objects;
 import java.util.UUID;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.types.Comparators;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Type;
@@ -299,6 +299,13 @@ class Literals {
           return (Literal<T>) new TimeLiteral(value());
         case TIMESTAMP:
           return (Literal<T>) new TimestampLiteral(value());
+        case DATE:
+          if ((long) Integer.MAX_VALUE < value()) {
+            return aboveMax();
+          } else if ((long) Integer.MIN_VALUE > value()) {
+            return belowMin();
+          }
+          return (Literal<T>) new DateLiteral(value().intValue());
         case DECIMAL:
           int scale = ((Types.DecimalType) type).scale();
           // rounding mode isn't necessary, but pass one to avoid warnings

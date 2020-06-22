@@ -19,32 +19,35 @@
 
 package org.apache.iceberg;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.util.Pair;
 import org.apache.iceberg.util.Tasks;
 import org.apache.iceberg.util.ThreadPools;
 
 import static org.apache.iceberg.TableProperties.MANIFEST_TARGET_SIZE_BYTES;
 import static org.apache.iceberg.TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT;
+import static org.apache.iceberg.TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED;
+import static org.apache.iceberg.TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED_DEFAULT;
 
 
 public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> implements RewriteManifests {
@@ -53,22 +56,20 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
   private static final String REPLACED_MANIFESTS_COUNT = "manifests-replaced";
   private static final String PROCESSED_ENTRY_COUNT = "entries-processed";
 
-  private static final Set<ManifestEntry.Status> ALLOWED_ENTRY_STATUSES = ImmutableSet.of(
-      ManifestEntry.Status.EXISTING);
-
   private final TableOperations ops;
-  private final PartitionSpec spec;
+  private final Map<Integer, PartitionSpec> specsById;
   private final long manifestTargetSizeBytes;
+  private final boolean snapshotIdInheritanceEnabled;
 
   private final Set<ManifestFile> deletedManifests = Sets.newHashSet();
   private final List<ManifestFile> addedManifests = Lists.newArrayList();
+  private final List<ManifestFile> rewrittenAddedManifests = Lists.newArrayList();
 
-  private final List<ManifestFile> keptManifests = Collections.synchronizedList(new ArrayList<>());
-  private final List<ManifestFile> newManifests = Collections.synchronizedList(new ArrayList<>());
-  private final Set<ManifestFile> rewrittenManifests = Collections.synchronizedSet(new HashSet<>());
-  private final Map<Object, WriterWrapper> writers = Collections.synchronizedMap(new HashMap<>());
+  private final Collection<ManifestFile> keptManifests = new ConcurrentLinkedQueue<>();
+  private final Collection<ManifestFile> newManifests = new ConcurrentLinkedQueue<>();
+  private final Set<ManifestFile> rewrittenManifests = Sets.newConcurrentHashSet();
+  private final Map<Object, WriterWrapper> writers = Maps.newConcurrentMap();
 
-  private final AtomicInteger manifestSuffix = new AtomicInteger(0);
   private final AtomicLong entryCount = new AtomicLong(0);
 
   private Function<DataFile, Object> clusterByFunc;
@@ -79,9 +80,11 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
   BaseRewriteManifests(TableOperations ops) {
     super(ops);
     this.ops = ops;
-    this.spec = ops.current().spec();
+    this.specsById = ops.current().specsById();
     this.manifestTargetSizeBytes =
       ops.current().propertyAsLong(MANIFEST_TARGET_SIZE_BYTES, MANIFEST_TARGET_SIZE_BYTES_DEFAULT);
+    this.snapshotIdInheritanceEnabled = ops.current()
+        .propertyAsBoolean(SNAPSHOT_ID_INHERITANCE_ENABLED, SNAPSHOT_ID_INHERITANCE_ENABLED_DEFAULT);
   }
 
   @Override
@@ -102,8 +105,9 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
 
   @Override
   protected Map<String, String> summary() {
+    int createdManifestsCount = newManifests.size() + addedManifests.size() + rewrittenAddedManifests.size();
+    summaryBuilder.set(CREATED_MANIFESTS_COUNT, String.valueOf(createdManifestsCount));
     summaryBuilder.set(KEPT_MANIFESTS_COUNT, String.valueOf(keptManifests.size()));
-    summaryBuilder.set(CREATED_MANIFESTS_COUNT, String.valueOf(newManifests.size() + addedManifests.size()));
     summaryBuilder.set(REPLACED_MANIFESTS_COUNT, String.valueOf(rewrittenManifests.size() + deletedManifests.size()));
     summaryBuilder.set(PROCESSED_ENTRY_COUNT, String.valueOf(entryCount.get()));
     return summaryBuilder.build();
@@ -129,28 +133,36 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
 
   @Override
   public RewriteManifests addManifest(ManifestFile manifest) {
-    try {
-      // the appended manifest must be rewritten with this update's snapshot ID
-      addedManifests.add(copyManifest(manifest));
-    } catch (IllegalArgumentException e) {
-      throw new IllegalArgumentException("Cannot append manifest: " + e.getMessage());
+    Preconditions.checkArgument(!manifest.hasAddedFiles(), "Cannot add manifest with added files");
+    Preconditions.checkArgument(!manifest.hasDeletedFiles(), "Cannot add manifest with deleted files");
+    Preconditions.checkArgument(
+        manifest.snapshotId() == null || manifest.snapshotId() == -1,
+        "Snapshot id must be assigned during commit");
+    Preconditions.checkArgument(manifest.sequenceNumber() == -1,
+        "Sequence must be assigned during commit");
+
+    if (snapshotIdInheritanceEnabled && manifest.snapshotId() == null) {
+      addedManifests.add(manifest);
+    } else {
+      // the manifest must be rewritten with this update's snapshot ID
+      ManifestFile copiedManifest = copyManifest(manifest);
+      rewrittenAddedManifests.add(copiedManifest);
     }
+
     return this;
   }
 
   private ManifestFile copyManifest(ManifestFile manifest) {
-    Map<Integer, PartitionSpec> specsById = ops.current().specsById();
-    try (ManifestReader reader = ManifestReader.read(ops.io().newInputFile(manifest.path()), specsById)) {
-      OutputFile newFile = manifestPath(manifestSuffix.getAndIncrement());
-      return ManifestWriter.copyManifest(reader, newFile, snapshotId(), summaryBuilder, ALLOWED_ENTRY_STATUSES);
-    } catch (IOException e) {
-      throw new RuntimeIOException(e, "Failed to close manifest: %s", manifest);
-    }
+    TableMetadata current = ops.current();
+    InputFile toCopy = ops.io().newInputFile(manifest.path());
+    OutputFile newFile = newManifestOutput();
+    return ManifestFiles.copyRewriteManifest(
+        current.formatVersion(), toCopy, specsById, newFile, snapshotId(), summaryBuilder);
   }
 
   @Override
   public List<ManifestFile> apply(TableMetadata base) {
-    List<ManifestFile> currentManifests = base.currentSnapshot().manifests();
+    List<ManifestFile> currentManifests = base.currentSnapshot().dataManifests();
     Set<ManifestFile> currentManifestSet = ImmutableSet.copyOf(currentManifests);
 
     validateDeletedManifests(currentManifestSet);
@@ -163,11 +175,15 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
 
     validateFilesCounts();
 
+    Iterable<ManifestFile> newManifestsWithMetadata = Iterables.transform(
+        Iterables.concat(newManifests, addedManifests, rewrittenAddedManifests),
+        manifest -> GenericManifestFile.copyOf(manifest).withSnapshotId(snapshotId()).build());
+
     // put new manifests at the beginning
-    List<ManifestFile> apply = new ArrayList<>();
-    apply.addAll(newManifests);
-    apply.addAll(addedManifests);
+    List<ManifestFile> apply = Lists.newArrayList();
+    Iterables.addAll(apply, newManifestsWithMetadata);
     apply.addAll(keptManifests);
+    apply.addAll(base.currentSnapshot().deleteManifests());
 
     return apply;
   }
@@ -219,11 +235,10 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
               keptManifests.add(manifest);
             } else {
               rewrittenManifests.add(manifest);
-              try (ManifestReader reader =
-                     ManifestReader.read(ops.io().newInputFile(manifest.path()), ops.current().specsById())) {
-                FilteredManifest filteredManifest = reader.select(Arrays.asList("*"));
-                filteredManifest.liveEntries().forEach(
-                    entry -> appendEntry(entry, clusterByFunc.apply(entry.file()))
+              try (ManifestReader<DataFile> reader = ManifestFiles.read(manifest, ops.io(), ops.current().specsById())
+                  .select(Arrays.asList("*"))) {
+                reader.liveEntries().forEach(
+                    entry -> appendEntry(entry, clusterByFunc.apply(entry.file()), manifest.partitionSpecId())
                 );
 
               } catch (IOException x) {
@@ -247,8 +262,11 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
   }
 
   private void validateFilesCounts() {
-    int createdManifestsFilesCount = activeFilesCount(newManifests) + activeFilesCount(addedManifests);
-    int replacedManifestsFilesCount = activeFilesCount(rewrittenManifests) + activeFilesCount(deletedManifests);
+    Iterable<ManifestFile> createdManifests = Iterables.concat(newManifests, addedManifests, rewrittenAddedManifests);
+    int createdManifestsFilesCount = activeFilesCount(createdManifests);
+
+    Iterable<ManifestFile> replacedManifests = Iterables.concat(rewrittenManifests, deletedManifests);
+    int replacedManifestsFilesCount = activeFilesCount(replacedManifests);
 
     if (createdManifestsFilesCount != replacedManifestsFilesCount) {
       throw new ValidationException(
@@ -270,33 +288,26 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
     return activeFilesCount;
   }
 
-  private void appendEntry(ManifestEntry entry, Object key) {
+  private void appendEntry(ManifestEntry<DataFile> entry, Object key, int partitionSpecId) {
     Preconditions.checkNotNull(entry, "Manifest entry cannot be null");
     Preconditions.checkNotNull(key, "Key cannot be null");
 
-    WriterWrapper writer = getWriter(key);
+    WriterWrapper writer = getWriter(key, partitionSpecId);
     writer.addEntry(entry);
     entryCount.incrementAndGet();
   }
 
-  private WriterWrapper getWriter(Object key) {
-    WriterWrapper writer = writers.get(key);
-    if (writer == null) {
-      synchronized (writers) {
-        writer = writers.get(key); // check again after getting lock
-        if (writer == null) {
-          writer = new WriterWrapper();
-          writers.put(key, writer);
-        }
-      }
-    }
-    return writer;
+  private WriterWrapper getWriter(Object key, int partitionSpecId) {
+    return writers.computeIfAbsent(
+        Pair.of(key, partitionSpecId), k -> new WriterWrapper(specsById.get(partitionSpecId)));
   }
 
   @Override
   protected void cleanUncommitted(Set<ManifestFile> committed) {
     cleanUncommitted(newManifests, committed);
-    cleanUncommitted(addedManifests, committed);
+    // clean up only rewrittenAddedManifests as they are always owned by the table
+    // don't clean up addedManifests as they are added to the manifest list and are not compacted
+    cleanUncommitted(rewrittenAddedManifests, committed);
   }
 
   private void cleanUncommitted(Iterable<ManifestFile> manifests, Set<ManifestFile> committedManifests) {
@@ -312,20 +323,21 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
   }
 
   class WriterWrapper {
-    private ManifestWriter writer;
+    private final PartitionSpec spec;
+    private ManifestWriter<DataFile> writer;
 
-    synchronized void addEntry(ManifestEntry entry) {
-      if (writer == null) {
-        writer = newWriter();
-      } else if (writer.length() >= getManifestTargetSizeBytes()) {
-        close();
-        writer = newWriter();
-      }
-      writer.existing(entry);
+    WriterWrapper(PartitionSpec spec) {
+      this.spec = spec;
     }
 
-    private ManifestWriter newWriter() {
-      return new ManifestWriter(spec, manifestPath(manifestSuffix.getAndIncrement()), snapshotId());
+    synchronized void addEntry(ManifestEntry<DataFile> entry) {
+      if (writer == null) {
+        writer = newManifestWriter(spec);
+      } else if (writer.length() >= getManifestTargetSizeBytes()) {
+        close();
+        writer = newManifestWriter(spec);
+      }
+      writer.existing(entry);
     }
 
     synchronized void close() {

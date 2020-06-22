@@ -163,10 +163,14 @@ public class TestHelpers {
     private final String path;
     private final long length;
     private final int specId;
+    private final ManifestContent content;
     private final Long snapshotId;
     private final Integer addedFiles;
+    private final Long addedRows;
     private final Integer existingFiles;
+    private final Long existingRows;
     private final Integer deletedFiles;
+    private final Long deletedRows;
     private final List<PartitionFieldSummary> partitions;
 
     public TestManifestFile(String path, long length, int specId, Long snapshotId,
@@ -175,10 +179,32 @@ public class TestHelpers {
       this.path = path;
       this.length = length;
       this.specId = specId;
+      this.content = ManifestContent.DATA;
       this.snapshotId = snapshotId;
       this.addedFiles = addedFiles;
+      this.addedRows = null;
       this.existingFiles = existingFiles;
+      this.existingRows = null;
       this.deletedFiles = deletedFiles;
+      this.deletedRows = null;
+      this.partitions = partitions;
+    }
+
+    public TestManifestFile(String path, long length, int specId, ManifestContent content, Long snapshotId,
+                            Integer addedFiles, Long addedRows, Integer existingFiles,
+                            Long existingRows, Integer deletedFiles, Long deletedRows,
+                            List<PartitionFieldSummary> partitions) {
+      this.path = path;
+      this.length = length;
+      this.specId = specId;
+      this.content = content;
+      this.snapshotId = snapshotId;
+      this.addedFiles = addedFiles;
+      this.addedRows = addedRows;
+      this.existingFiles = existingFiles;
+      this.existingRows = existingRows;
+      this.deletedFiles = deletedFiles;
+      this.deletedRows = deletedRows;
       this.partitions = partitions;
     }
 
@@ -198,6 +224,21 @@ public class TestHelpers {
     }
 
     @Override
+    public ManifestContent content() {
+      return content;
+    }
+
+    @Override
+    public long sequenceNumber() {
+      return 0;
+    }
+
+    @Override
+    public long minSequenceNumber() {
+      return 0;
+    }
+
+    @Override
     public Long snapshotId() {
       return snapshotId;
     }
@@ -208,13 +249,28 @@ public class TestHelpers {
     }
 
     @Override
+    public Long addedRowsCount() {
+      return addedRows;
+    }
+
+    @Override
     public Integer existingFilesCount() {
       return existingFiles;
     }
 
     @Override
+    public Long existingRowsCount() {
+      return existingRows;
+    }
+
+    @Override
     public Integer deletedFilesCount() {
       return deletedFiles;
+    }
+
+    @Override
+    public Long deletedRowsCount() {
+      return deletedRows;
     }
 
     @Override
@@ -278,16 +334,6 @@ public class TestHelpers {
     @Override
     public long fileSizeInBytes() {
       return 0;
-    }
-
-    @Override
-    public Integer fileOrdinal() {
-      return null;
-    }
-
-    @Override
-    public List<Integer> sortColumns() {
-      return null;
     }
 
     @Override

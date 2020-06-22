@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.hive;
 
-import com.google.common.collect.Lists;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Collections;
@@ -31,7 +30,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hive.common.StatsSetupConst;
+import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.hadoop.hive.metastore.TableType;
+import org.apache.hadoop.hive.metastore.api.EnvironmentContext;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.LockComponent;
 import org.apache.hadoop.hive.metastore.api.LockLevel;
@@ -46,11 +48,14 @@ import org.apache.hadoop.hive.metastore.api.Table;
 import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.common.DynMethods;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.hadoop.HadoopFileIO;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,10 +67,20 @@ import org.slf4j.LoggerFactory;
 public class HiveTableOperations extends BaseMetastoreTableOperations {
   private static final Logger LOG = LoggerFactory.getLogger(HiveTableOperations.class);
 
+  private static final String HIVE_ACQUIRE_LOCK_STATE_TIMEOUT_MS = "iceberg.hive.lock-timeout-ms";
+  private static final long HIVE_ACQUIRE_LOCK_STATE_TIMEOUT_MS_DEFAULT = 3 * 60 * 1000; // 3 minutes
+  private static final DynMethods.UnboundMethod ALTER_TABLE = DynMethods.builder("alter_table")
+      .impl(HiveMetaStoreClient.class, "alter_table_with_environmentContext",
+          String.class, String.class, Table.class, EnvironmentContext.class)
+      .impl(HiveMetaStoreClient.class, "alter_table",
+          String.class, String.class, Table.class, EnvironmentContext.class)
+      .build();
+
   private final HiveClientPool metaClients;
   private final String database;
   private final String tableName;
   private final Configuration conf;
+  private final long lockAcquireTimeout;
 
   private FileIO fileIO;
 
@@ -74,6 +89,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
     this.metaClients = metaClients;
     this.database = database;
     this.tableName = table;
+    this.lockAcquireTimeout =
+        conf.getLong(HIVE_ACQUIRE_LOCK_STATE_TIMEOUT_MS, HIVE_ACQUIRE_LOCK_STATE_TIMEOUT_MS_DEFAULT);
   }
 
   @Override
@@ -152,7 +169,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
 
       tbl.setSd(storageDescriptor(metadata)); // set to pickup any schema changes
       String metadataLocation = tbl.getParameters().get(METADATA_LOCATION_PROP);
-      String baseMetadataLocation = base != null ? base.file().location() : null;
+      String baseMetadataLocation = base != null ? base.metadataFileLocation() : null;
       if (!Objects.equals(baseMetadataLocation, metadataLocation)) {
         throw new CommitFailedException(
             "Base metadata location '%s' is not same as the current table metadata location '%s' for %s.%s",
@@ -163,7 +180,10 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
 
       if (base != null) {
         metaClients.run(client -> {
-          client.alter_table(database, tableName, tbl);
+          EnvironmentContext envContext = new EnvironmentContext(
+              ImmutableMap.of(StatsSetupConst.DO_NOT_UPDATE_STATS, StatsSetupConst.TRUE)
+          );
+          ALTER_TABLE.invoke(client, database, tableName, tbl, envContext);
           return null;
         });
       } else {
@@ -177,7 +197,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
       throw new AlreadyExistsException("Table already exists: %s.%s", database, tableName);
 
     } catch (TException | UnknownHostException e) {
-      if (e.getMessage().contains("Table/View 'HIVE_LOCKS' does not exist")) {
+      if (e.getMessage() != null && e.getMessage().contains("Table/View 'HIVE_LOCKS' does not exist")) {
         throw new RuntimeException("Failed to acquire locks from metastore because 'HIVE_LOCKS' doesn't " +
             "exist, this probably happened when using embedded metastore or doesn't create a " +
             "transactional meta table. To fix this, use an alternative metastore", e);
@@ -243,11 +263,27 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
     LockResponse lockResponse = metaClients.run(client -> client.lock(lockRequest));
     LockState state = lockResponse.getState();
     long lockId = lockResponse.getLockid();
-    //TODO add timeout
-    while (state.equals(LockState.WAITING)) {
+
+    final long start = System.currentTimeMillis();
+    long duration = 0;
+    boolean timeout = false;
+    while (!timeout && state.equals(LockState.WAITING)) {
       lockResponse = metaClients.run(client -> client.checkLock(lockId));
       state = lockResponse.getState();
-      Thread.sleep(50);
+
+      // check timeout
+      duration = System.currentTimeMillis() - start;
+      if (duration > lockAcquireTimeout) {
+        timeout = true;
+      } else {
+        Thread.sleep(50);
+      }
+    }
+
+    // timeout and do not have lock acquired
+    if (timeout && !state.equals(LockState.ACQUIRED)) {
+      throw new CommitFailedException(String.format("Timed out after %s ms waiting for lock on %s.%s",
+          duration, database, tableName));
     }
 
     if (!state.equals(LockState.ACQUIRED)) {
@@ -260,13 +296,18 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
   private void unlock(Optional<Long> lockId) {
     if (lockId.isPresent()) {
       try {
-        metaClients.run(client -> {
-          client.unlock(lockId.get());
-          return null;
-        });
+        doUnlock(lockId.get());
       } catch (Exception e) {
-        throw new RuntimeException(String.format("Failed to unlock %s.%s", database, tableName), e);
+        LOG.warn("Failed to unlock {}.{}", database, tableName, e);
       }
     }
+  }
+
+  // visible for testing
+  protected void doUnlock(long lockId) throws TException, InterruptedException {
+    metaClients.run(client -> {
+      client.unlock(lockId);
+      return null;
+    });
   }
 }

@@ -19,9 +19,6 @@
 
 package org.apache.iceberg.parquet;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Locale;
@@ -41,6 +38,9 @@ import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.parquet.HadoopReadOptions;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.avro.AvroReadSupport;
@@ -58,6 +58,8 @@ import org.apache.parquet.schema.MessageType;
 
 import static org.apache.iceberg.TableProperties.PARQUET_COMPRESSION;
 import static org.apache.iceberg.TableProperties.PARQUET_COMPRESSION_DEFAULT;
+import static org.apache.iceberg.TableProperties.PARQUET_COMPRESSION_LEVEL;
+import static org.apache.iceberg.TableProperties.PARQUET_COMPRESSION_LEVEL_DEFAULT;
 import static org.apache.iceberg.TableProperties.PARQUET_DICT_SIZE_BYTES;
 import static org.apache.iceberg.TableProperties.PARQUET_DICT_SIZE_BYTES_DEFAULT;
 import static org.apache.iceberg.TableProperties.PARQUET_PAGE_SIZE_BYTES;
@@ -182,6 +184,24 @@ public class Parquet {
           PARQUET_PAGE_SIZE_BYTES, PARQUET_PAGE_SIZE_BYTES_DEFAULT));
       int dictionaryPageSize = Integer.parseInt(config.getOrDefault(
           PARQUET_DICT_SIZE_BYTES, PARQUET_DICT_SIZE_BYTES_DEFAULT));
+      String compressionLevel = config.getOrDefault(
+          PARQUET_COMPRESSION_LEVEL, PARQUET_COMPRESSION_LEVEL_DEFAULT);
+
+      if (compressionLevel != null) {
+        switch (codec()) {
+          case GZIP:
+            config.put("zlib.compress.level", compressionLevel);
+            break;
+          case BROTLI:
+            config.put("compression.brotli.quality", compressionLevel);
+            break;
+          case ZSTD:
+            config.put("io.compression.codec.zstd.level", compressionLevel);
+            break;
+          default:
+            // compression level is not supported; ignore it
+        }
+      }
 
       WriterVersion writerVersion = WriterVersion.PARQUET_1_0;
 
@@ -284,12 +304,14 @@ public class Parquet {
     private Schema schema = null;
     private Expression filter = null;
     private ReadSupport<?> readSupport = null;
+    private Function<MessageType, VectorizedReader<?>> batchedReaderFunc = null;
     private Function<MessageType, ParquetValueReader<?>> readerFunc = null;
     private boolean filterRecords = true;
     private boolean caseSensitive = true;
     private Map<String, String> properties = Maps.newHashMap();
     private boolean callInit = false;
     private boolean reuseContainers = false;
+    private int maxRecordsPerBatch = 10000;
 
     private ReadBuilder(InputFile file) {
       this.file = file;
@@ -338,7 +360,16 @@ public class Parquet {
     }
 
     public ReadBuilder createReaderFunc(Function<MessageType, ParquetValueReader<?>> newReaderFunction) {
+      Preconditions.checkArgument(this.batchedReaderFunc == null,
+          "Reader function cannot be set since the batched version is already set");
       this.readerFunc = newReaderFunction;
+      return this;
+    }
+
+    public ReadBuilder createBatchedReaderFunc(Function<MessageType, VectorizedReader<?>> func) {
+      Preconditions.checkArgument(this.readerFunc == null,
+          "Batched reader function cannot be set since the non-batched version is already set");
+      this.batchedReaderFunc = func;
       return this;
     }
 
@@ -357,9 +388,14 @@ public class Parquet {
       return this;
     }
 
-    @SuppressWarnings("unchecked")
+    public ReadBuilder recordsPerBatch(int numRowsPerBatch) {
+      this.maxRecordsPerBatch = numRowsPerBatch;
+      return this;
+    }
+
+    @SuppressWarnings({"unchecked", "checkstyle:CyclomaticComplexity"})
     public <D> CloseableIterable<D> build() {
-      if (readerFunc != null) {
+      if (readerFunc != null || batchedReaderFunc != null) {
         ParquetReadOptions.Builder optionsBuilder;
         if (file instanceof HadoopInputFile) {
           // remove read properties already set that may conflict with this read
@@ -382,8 +418,13 @@ public class Parquet {
 
         ParquetReadOptions options = optionsBuilder.build();
 
-        return new org.apache.iceberg.parquet.ParquetReader<>(
-            file, schema, options, readerFunc, filter, reuseContainers, caseSensitive);
+        if (batchedReaderFunc != null) {
+          return new VectorizedParquetReader(file, schema, options, batchedReaderFunc, filter, reuseContainers,
+              caseSensitive, maxRecordsPerBatch);
+        } else {
+          return new org.apache.iceberg.parquet.ParquetReader<>(
+              file, schema, options, readerFunc, filter, reuseContainers, caseSensitive);
+        }
       }
 
       ParquetReadBuilder<D> builder = new ParquetReadBuilder<>(ParquetIO.file(file));

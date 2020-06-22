@@ -20,9 +20,12 @@
 package org.apache.iceberg.expressions;
 
 import java.nio.ByteBuffer;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.ExpressionVisitors.BoundExpressionVisitor;
@@ -38,15 +41,12 @@ import static org.apache.iceberg.expressions.Expressions.rewriteNot;
  * <p>
  * This evaluation is inclusive: it returns true if a file may match and false if it cannot match.
  * <p>
- * Files are passed to {@link #eval(DataFile)}, which returns true if the file may contain matching
+ * Files are passed to {@link #eval(ContentFile)}, which returns true if the file may contain matching
  * rows and false if the file cannot contain matching rows. Files may be skipped if and only if the
  * return value of {@code eval} is false.
  */
 public class InclusiveMetricsEvaluator {
-  private final Schema schema;
-  private final StructType struct;
   private final Expression expr;
-  private final boolean caseSensitive;
   private transient ThreadLocal<MetricsEvalVisitor> visitors = null;
 
   private MetricsEvalVisitor visitor() {
@@ -61,9 +61,7 @@ public class InclusiveMetricsEvaluator {
   }
 
   public InclusiveMetricsEvaluator(Schema schema, Expression unbound, boolean caseSensitive) {
-    this.schema = schema;
-    this.struct = schema.asStruct();
-    this.caseSensitive = caseSensitive;
+    StructType struct = schema.asStruct();
     this.expr = Binder.bind(struct, rewriteNot(unbound), caseSensitive);
   }
 
@@ -73,7 +71,7 @@ public class InclusiveMetricsEvaluator {
    * @param file a data file
    * @return false if the file cannot contain rows that match the expression, true otherwise.
    */
-  public boolean eval(DataFile file) {
+  public boolean eval(ContentFile<?> file) {
     // TODO: detect the case where a column is missing from the file using file's max field id.
     return visitor().eval(file);
   }
@@ -87,9 +85,16 @@ public class InclusiveMetricsEvaluator {
     private Map<Integer, ByteBuffer> lowerBounds = null;
     private Map<Integer, ByteBuffer> upperBounds = null;
 
-    private boolean eval(DataFile file) {
-      if (file.recordCount() <= 0) {
+    private boolean eval(ContentFile<?> file) {
+      if (file.recordCount() == 0) {
         return ROWS_CANNOT_MATCH;
+      }
+
+      if (file.recordCount() < 0) {
+        // we haven't implemented parsing record count from avro file and thus set record count -1
+        // when importing avro tables to iceberg tables. This should be updated once we implemented
+        // and set correct record count.
+        return ROWS_MIGHT_MATCH;
       }
 
       this.valueCounts = file.valueCounts();
@@ -269,11 +274,37 @@ public class InclusiveMetricsEvaluator {
 
     @Override
     public <T> Boolean in(BoundReference<T> ref, Set<T> literalSet) {
+      Integer id = ref.fieldId();
+
+      if (containsNullsOnly(id)) {
+        return ROWS_CANNOT_MATCH;
+      }
+
+      Collection<T> literals = literalSet;
+
+      if (lowerBounds != null && lowerBounds.containsKey(id)) {
+        T lower = Conversions.fromByteBuffer(ref.type(), lowerBounds.get(id));
+        literals = literals.stream().filter(v -> ref.comparator().compare(lower, v) <= 0).collect(Collectors.toList());
+        if (literals.isEmpty()) { // if all values are less than lower bound, rows cannot match.
+          return ROWS_CANNOT_MATCH;
+        }
+      }
+
+      if (upperBounds != null && upperBounds.containsKey(id)) {
+        T upper = Conversions.fromByteBuffer(ref.type(), upperBounds.get(id));
+        literals = literals.stream().filter(v -> ref.comparator().compare(upper, v) >= 0).collect(Collectors.toList());
+        if (literals.isEmpty()) { // if all remaining values are greater than upper bound, rows cannot match.
+          return ROWS_CANNOT_MATCH;
+        }
+      }
+
       return ROWS_MIGHT_MATCH;
     }
 
     @Override
     public <T> Boolean notIn(BoundReference<T> ref, Set<T> literalSet) {
+      // because the bounds are not necessarily a min or max value, this cannot be answered using
+      // them. notIn(col, {X, ...}) with (X, Y) doesn't guarantee that X is a value in col.
       return ROWS_MIGHT_MATCH;
     }
 

@@ -59,11 +59,17 @@ public class TableProperties {
   public static final String PARQUET_COMPRESSION = "write.parquet.compression-codec";
   public static final String PARQUET_COMPRESSION_DEFAULT = "gzip";
 
+  public static final String PARQUET_COMPRESSION_LEVEL = "write.parquet.compression-level";
+  public static final String PARQUET_COMPRESSION_LEVEL_DEFAULT = null;
+
   public static final String AVRO_COMPRESSION = "write.avro.compression-codec";
   public static final String AVRO_COMPRESSION_DEFAULT = "gzip";
 
   public static final String SPLIT_SIZE = "read.split.target-size";
   public static final long SPLIT_SIZE_DEFAULT = 134217728; // 128 MB
+
+  public static final String METADATA_SPLIT_SIZE = "read.split.metadata-target-size";
+  public static final long METADATA_SPLIT_SIZE_DEFAULT = 32 * 1024 * 1024; // 32 MB
 
   public static final String SPLIT_LOOKBACK = "read.split.planning-lookback";
   public static final int SPLIT_LOOKBACK_DEFAULT = 10;
@@ -92,6 +98,13 @@ public class TableProperties {
   public static final String METADATA_COMPRESSION = "write.metadata.compression-codec";
   public static final String METADATA_COMPRESSION_DEFAULT = "none";
 
+  public static final String METADATA_PREVIOUS_VERSIONS_MAX = "write.metadata.previous-versions-max";
+  public static final int METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT = 100;
+
+  // This enables to delete the oldest metadata file after commit.
+  public static final String METADATA_DELETE_AFTER_COMMIT_ENABLED = "write.metadata.delete-after-commit.enabled";
+  public static final boolean METADATA_DELETE_AFTER_COMMIT_ENABLED_DEFAULT = false;
+
   public static final String METRICS_MODE_COLUMN_CONF_PREFIX = "write.metadata.metrics.column.";
   public static final String DEFAULT_WRITE_METRICS_MODE = "write.metadata.metrics.default";
   public static final String DEFAULT_WRITE_METRICS_MODE_DEFAULT = "truncate(16)";
@@ -103,4 +116,7 @@ public class TableProperties {
 
   public static final String WRITE_TARGET_FILE_SIZE_BYTES = "write.target-file-size-bytes";
   public static final long WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT = Long.MAX_VALUE;
+
+  public static final String SNAPSHOT_ID_INHERITANCE_ENABLED = "compatibility.snapshot-id-inheritance.enabled";
+  public static final boolean SNAPSHOT_ID_INHERITANCE_ENABLED_DEFAULT = false;
 }

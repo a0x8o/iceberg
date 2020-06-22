@@ -19,42 +19,35 @@
 
 package org.apache.iceberg;
 
-import java.io.File;
 import java.io.IOException;
+import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.types.Types;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
+import org.junit.Assert;
 import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.junit.Assert.assertEquals;
 
-public class TestDataTableScan {
-
-  @Rule
-  public TemporaryFolder temp = new TemporaryFolder();
-  private final Schema schema = new Schema(
-      required(1, "id", Types.IntegerType.get()),
-      required(2, "data", Types.StringType.get()));
-  private File tableDir = null;
-
-  @Before
-  public void setupTableDir() throws IOException {
-    this.tableDir = temp.newFolder();
+@RunWith(Parameterized.class)
+public class TestDataTableScan extends TableTestBase {
+  @Parameterized.Parameters
+  public static Object[][] parameters() {
+    return new Object[][] {
+        new Object[] { 1 },
+        new Object[] { 2 },
+    };
   }
 
-  @After
-  public void cleanupTables() {
-    TestTables.clearTables();
+  public TestDataTableScan(int formatVersion) {
+    super(formatVersion);
   }
 
   @Test
   public void testTableScanHonorsSelect() {
-    PartitionSpec spec = PartitionSpec.unpartitioned();
-    Table table = TestTables.create(tableDir, "test", schema, spec);
-
     TableScan scan = table.newScan().select("id");
 
     Schema expectedSchema = new Schema(required(1, "id", Types.IntegerType.get()));
@@ -66,9 +59,6 @@ public class TestDataTableScan {
 
   @Test
   public void testTableScanHonorsSelectWithoutCaseSensitivity() {
-    PartitionSpec spec = PartitionSpec.unpartitioned();
-    Table table = TestTables.create(tableDir, "test", schema, spec);
-
     TableScan scan1 = table.newScan().caseSensitive(false).select("ID");
     // order of refinements shouldn't matter
     TableScan scan2 = table.newScan().select("ID").caseSensitive(false);
@@ -84,4 +74,36 @@ public class TestDataTableScan {
         scan2.schema().asStruct());
   }
 
+  @Test
+  public void testTableScanHonorsIgnoreResiduals() throws IOException {
+    table.newFastAppend()
+        .appendFile(FILE_A)
+        .appendFile(FILE_B)
+        .commit();
+
+    TableScan scan1 = table.newScan()
+        .filter(Expressions.equal("id", 5));
+
+    try (CloseableIterable<CombinedScanTask> tasks = scan1.planTasks()) {
+      Assert.assertTrue("Tasks should not be empty", Iterables.size(tasks) > 0);
+      for (CombinedScanTask combinedScanTask : tasks) {
+        for (FileScanTask fileScanTask : combinedScanTask.files()) {
+          Assert.assertNotEquals("Residuals must be preserved", Expressions.alwaysTrue(), fileScanTask.residual());
+        }
+      }
+    }
+
+    TableScan scan2 = table.newScan()
+        .filter(Expressions.equal("id", 5))
+        .ignoreResiduals();
+
+    try (CloseableIterable<CombinedScanTask> tasks = scan2.planTasks()) {
+      Assert.assertTrue("Tasks should not be empty", Iterables.size(tasks) > 0);
+      for (CombinedScanTask combinedScanTask : tasks) {
+        for (FileScanTask fileScanTask : combinedScanTask.files()) {
+          Assert.assertEquals("Residuals must be ignored", Expressions.alwaysTrue(), fileScanTask.residual());
+        }
+      }
+    }
+  }
 }

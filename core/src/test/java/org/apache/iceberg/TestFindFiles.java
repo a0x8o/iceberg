@@ -19,15 +19,33 @@
 
 package org.apache.iceberg;
 
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
 import java.util.Arrays;
 import java.util.Set;
 import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Conversions;
+import org.apache.iceberg.types.Types;
 import org.junit.Assert;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
+@RunWith(Parameterized.class)
 public class TestFindFiles extends TableTestBase {
+  @Parameterized.Parameters
+  public static Object[][] parameters() {
+    return new Object[][] {
+        new Object[] { 1 },
+        new Object[] { 2 },
+    };
+  }
+
+  public TestFindFiles(int formatVersion) {
+    super(formatVersion);
+  }
+
   @Test
   public void testBasicBehavior() {
     table.newAppend()
@@ -54,6 +72,28 @@ public class TestFindFiles extends TableTestBase {
         .collect();
 
     Assert.assertEquals(pathSet(FILE_A), pathSet(files));
+  }
+
+  @Test
+  public void testWithRecordsMatching() {
+    table.newAppend()
+        .appendFile(DataFiles.builder(SPEC)
+            .withInputFile(Files.localInput("/path/to/data-e.parquet"))
+            .withPartitionPath("data_bucket=4")
+            .withMetrics(new Metrics(3L,
+                null, // no column sizes
+                ImmutableMap.of(1, 3L), // value count
+                ImmutableMap.of(1, 0L), // null count
+                ImmutableMap.of(1, Conversions.toByteBuffer(Types.IntegerType.get(), 1)),  // lower bounds
+                ImmutableMap.of(1, Conversions.toByteBuffer(Types.IntegerType.get(), 5)))) // lower bounds
+            .build())
+        .commit();
+
+    final Iterable<DataFile> files = FindFiles.in(table)
+        .withRecordsMatching(Expressions.equal("id", 1))
+        .collect();
+
+    Assert.assertEquals(Sets.newHashSet("/path/to/data-e.parquet"), pathSet(files));
   }
 
   @Test

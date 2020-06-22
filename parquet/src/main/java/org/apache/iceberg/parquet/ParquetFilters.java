@@ -111,43 +111,47 @@ class ParquetFilters {
 
     @Override
     public <T> FilterPredicate predicate(BoundPredicate<T> pred) {
+      if (!(pred.term() instanceof BoundReference)) {
+        throw new UnsupportedOperationException("Cannot convert non-reference to Parquet filter: " + pred.term());
+      }
+
       Operation op = pred.op();
-      BoundReference<T> ref = pred.ref();
-      Literal<T> lit = pred.literal();
+      BoundReference<T> ref = (BoundReference<T>) pred.term();
       String path = schema.idToAlias(ref.fieldId());
+      Literal<T> lit;
+      if (pred.isUnaryPredicate()) {
+        lit = null;
+      } else if (pred.isLiteralPredicate()) {
+        lit = pred.asLiteralPredicate().literal();
+      } else {
+        throw new UnsupportedOperationException("Cannot convert to Parquet filter: " + pred);
+      }
 
       switch (ref.type().typeId()) {
         case BOOLEAN:
-          Operators.BooleanColumn col = FilterApi.booleanColumn(schema.idToAlias(ref.fieldId()));
+          Operators.BooleanColumn col = FilterApi.booleanColumn(path);
           switch (op) {
             case EQ:
               return FilterApi.eq(col, getParquetPrimitive(lit));
             case NOT_EQ:
-              return FilterApi.eq(col, getParquetPrimitive(lit));
+              return FilterApi.notEq(col, getParquetPrimitive(lit));
           }
-
+          break;
         case INTEGER:
+        case DATE:
           return pred(op, FilterApi.intColumn(path), getParquetPrimitive(lit));
         case LONG:
+        case TIME:
+        case TIMESTAMP:
           return pred(op, FilterApi.longColumn(path), getParquetPrimitive(lit));
         case FLOAT:
           return pred(op, FilterApi.floatColumn(path), getParquetPrimitive(lit));
         case DOUBLE:
           return pred(op, FilterApi.doubleColumn(path), getParquetPrimitive(lit));
-        case DATE:
-          return pred(op, FilterApi.intColumn(path), getParquetPrimitive(lit));
-        case TIME:
-          return pred(op, FilterApi.longColumn(path), getParquetPrimitive(lit));
-        case TIMESTAMP:
-          return pred(op, FilterApi.longColumn(path), getParquetPrimitive(lit));
         case STRING:
-          return pred(op, FilterApi.binaryColumn(path), getParquetPrimitive(lit));
         case UUID:
-          return pred(op, FilterApi.binaryColumn(path), getParquetPrimitive(lit));
         case FIXED:
-          return pred(op, FilterApi.binaryColumn(path), getParquetPrimitive(lit));
         case BINARY:
-          return pred(op, FilterApi.binaryColumn(path), getParquetPrimitive(lit));
         case DECIMAL:
           return pred(op, FilterApi.binaryColumn(path), getParquetPrimitive(lit));
       }

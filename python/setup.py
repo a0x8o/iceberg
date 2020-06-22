@@ -20,20 +20,18 @@ from setuptools import setup
 
 setup(
     name='iceberg',
-    maintainer='Apache Incubator Iceberg Devs',
+    maintainer='Apache Iceberg Devs',
     author_email='dev@iceberg.apache.org',
     description='Iceberg is a new table format for storing large, slow-moving tabular data',
     keywords='iceberg',
-    url='https://github.com/apache/incubator-iceberg/blob/master/README.md',
-    python_requires='>=3.4',
+    url='https://github.com/apache/iceberg/blob/master/README.md',
+    python_requires='>=3.6',
     install_requires=['botocore',
                       'boto3',
                       'fastavro',
                       'fastparquet>=0.3.1',
                       'hmsclient',
                       'mmh3',
-                      'mo_future<2.50.19316',
-                      'moz_sql_parser==2.44.19084',
                       'pyparsing',
                       'python-dateutil',
                       'pytz',
@@ -42,5 +40,18 @@ setup(
                       'pandas',
                       'pyarrow'
                       ],
-    setup_requires=['setupmeta']
+    extras_require={
+        "dev": [
+            "tox-travis==0.12",
+            "virtualenv<20.0.0",
+        ],
+    },
+    setup_requires=['setupmeta'],
+    license="Apache License 2.0",
+    classifiers=[
+        "License :: OSI Approved :: Apache Software License",
+        "Programming Language :: Python :: 3.6",
+        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
+    ],
 )

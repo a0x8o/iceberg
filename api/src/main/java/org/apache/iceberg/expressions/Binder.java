@@ -19,12 +19,12 @@
 
 package org.apache.iceberg.expressions;
 
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
 import java.util.List;
 import java.util.Set;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.expressions.ExpressionVisitors.ExpressionVisitor;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types.StructType;
 
@@ -141,11 +141,6 @@ public class Binder {
     }
 
     @Override
-    public <T> Expression predicate(BoundSetPredicate<T> pred) {
-      throw new IllegalStateException("Found already bound set predicate: " + pred);
-    }
-
-    @Override
     public <T> Expression predicate(UnboundPredicate<T> pred) {
       return pred.bind(struct, caseSensitive);
     }
@@ -181,12 +176,6 @@ public class Binder {
 
     @Override
     public <T> Set<Integer> predicate(BoundPredicate<T> pred) {
-      references.add(pred.ref().fieldId());
-      return references;
-    }
-
-    @Override
-    public <T> Set<Integer> predicate(BoundSetPredicate<T> pred) {
       references.add(pred.ref().fieldId());
       return references;
     }

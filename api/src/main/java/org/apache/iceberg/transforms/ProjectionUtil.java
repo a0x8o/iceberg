@@ -21,9 +21,14 @@ package org.apache.iceberg.transforms;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import org.apache.iceberg.expressions.BoundLiteralPredicate;
 import org.apache.iceberg.expressions.BoundPredicate;
+import org.apache.iceberg.expressions.BoundSetPredicate;
+import org.apache.iceberg.expressions.BoundTransform;
 import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.UnboundPredicate;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 
 import static org.apache.iceberg.expressions.Expressions.predicate;
 
@@ -32,7 +37,7 @@ class ProjectionUtil {
   private ProjectionUtil() {}
 
   static <T> UnboundPredicate<T> truncateInteger(
-      String name, BoundPredicate<Integer> pred, Transform<Integer, T> transform) {
+      String name, BoundLiteralPredicate<Integer> pred, Transform<Integer, T> transform) {
     int boundary = pred.literal().value();
     switch (pred.op()) {
       case LT:
@@ -53,7 +58,7 @@ class ProjectionUtil {
   }
 
   static <T> UnboundPredicate<T> truncateIntegerStrict(
-      String name, BoundPredicate<Integer> pred, Transform<Integer, T> transform) {
+      String name, BoundLiteralPredicate<Integer> pred, Transform<Integer, T> transform) {
     int boundary = pred.literal().value();
     switch (pred.op()) {
       case LT:
@@ -75,7 +80,7 @@ class ProjectionUtil {
   }
 
   static <T> UnboundPredicate<T> truncateLongStrict(
-      String name, BoundPredicate<Long> pred, Transform<Long, T> transform) {
+      String name, BoundLiteralPredicate<Long> pred, Transform<Long, T> transform) {
     long boundary = pred.literal().value();
     switch (pred.op()) {
       case LT:
@@ -97,7 +102,7 @@ class ProjectionUtil {
   }
 
   static <T> UnboundPredicate<T> truncateLong(
-      String name, BoundPredicate<Long> pred, Transform<Long, T> transform) {
+      String name, BoundLiteralPredicate<Long> pred, Transform<Long, T> transform) {
     long boundary = pred.literal().value();
     switch (pred.op()) {
       case LT:
@@ -118,7 +123,7 @@ class ProjectionUtil {
   }
 
   static <T> UnboundPredicate<T> truncateDecimal(
-      String name, BoundPredicate<BigDecimal> pred,
+      String name, BoundLiteralPredicate<BigDecimal> pred,
       Transform<BigDecimal, T> transform) {
     BigDecimal boundary = pred.literal().value();
     switch (pred.op()) {
@@ -146,7 +151,7 @@ class ProjectionUtil {
   }
 
   static <T> UnboundPredicate<T> truncateDecimalStrict(
-      String name, BoundPredicate<BigDecimal> pred,
+      String name, BoundLiteralPredicate<BigDecimal> pred,
       Transform<BigDecimal, T> transform) {
     BigDecimal boundary = pred.literal().value();
 
@@ -178,7 +183,7 @@ class ProjectionUtil {
   }
 
   static <S, T> UnboundPredicate<T> truncateArray(
-      String name, BoundPredicate<S> pred, Transform<S, T> transform) {
+      String name, BoundLiteralPredicate<S> pred, Transform<S, T> transform) {
     S boundary = pred.literal().value();
     switch (pred.op()) {
       case LT:
@@ -199,7 +204,7 @@ class ProjectionUtil {
   }
 
   static <S, T> UnboundPredicate<T> truncateArrayStrict(
-      String name, BoundPredicate<S> pred, Transform<S, T> transform) {
+      String name, BoundLiteralPredicate<S> pred, Transform<S, T> transform) {
     S boundary = pred.literal().value();
     switch (pred.op()) {
       case LT:
@@ -216,5 +221,36 @@ class ProjectionUtil {
       default:
         return null;
     }
+  }
+
+  /**
+   * If the predicate has a transformed child that matches the given transform, return a predicate.
+   */
+  @SuppressWarnings("unchecked")
+  static <T> UnboundPredicate<T> projectTransformPredicate(Transform<?, T> transform,
+                                                           String partitionName, BoundPredicate<?> pred) {
+    if (pred.term() instanceof BoundTransform && transform.equals(((BoundTransform<?, ?>) pred.term()).transform())) {
+      // the bound value must be a T because the transform matches
+      return (UnboundPredicate<T>) removeTransform(partitionName, pred);
+    }
+    return null;
+  }
+
+  private static <T> UnboundPredicate<T> removeTransform(String partitionName, BoundPredicate<T> pred) {
+    if (pred.isUnaryPredicate()) {
+      return Expressions.predicate(pred.op(), partitionName);
+    } else if (pred.isLiteralPredicate()) {
+      return Expressions.predicate(pred.op(), partitionName, pred.asLiteralPredicate().literal());
+    } else if (pred.isSetPredicate()) {
+      return Expressions.predicate(pred.op(), partitionName, pred.asSetPredicate().literalSet());
+    }
+    throw new UnsupportedOperationException("Cannot replace transform in unknown predicate: " + pred);
+  }
+
+  static <S, T> UnboundPredicate<T> transformSet(String fieldName,
+                                                 BoundSetPredicate<S> predicate,
+                                                 Transform<S, T> transform) {
+    return predicate(predicate.op(), fieldName,
+        Iterables.transform(predicate.asSetPredicate().literalSet(), transform::apply));
   }
 }

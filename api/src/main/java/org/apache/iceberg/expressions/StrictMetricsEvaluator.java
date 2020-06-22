@@ -19,13 +19,16 @@
 
 package org.apache.iceberg.expressions;
 
-import com.google.common.base.Preconditions;
 import java.nio.ByteBuffer;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.ExpressionVisitors.BoundExpressionVisitor;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.StructType;
@@ -39,7 +42,7 @@ import static org.apache.iceberg.expressions.Expressions.rewriteNot;
  * example, if a file's ts column has min X and max Y, this evaluator will return true for ts &lt; Y+1
  * but not for ts &lt; Y-1.
  * <p>
- * Files are passed to {@link #eval(DataFile)}, which returns true if all rows in the file must
+ * Files are passed to {@link #eval(ContentFile)}, which returns true if all rows in the file must
  * contain matching rows and false if the file may contain rows that do not match.
  */
 public class StrictMetricsEvaluator {
@@ -67,7 +70,7 @@ public class StrictMetricsEvaluator {
    * @param file a data file
    * @return false if the file cannot contain rows that match the expression, true otherwise.
    */
-  public boolean eval(DataFile file) {
+  public boolean eval(ContentFile<?> file) {
     // TODO: detect the case where a column is missing from the file using file's max field id.
     return visitor().eval(file);
   }
@@ -81,7 +84,7 @@ public class StrictMetricsEvaluator {
     private Map<Integer, ByteBuffer> lowerBounds = null;
     private Map<Integer, ByteBuffer> upperBounds = null;
 
-    private boolean eval(DataFile file) {
+    private boolean eval(ContentFile<?> file) {
       if (file.recordCount() <= 0) {
         return ROWS_MUST_MATCH;
       }
@@ -308,11 +311,69 @@ public class StrictMetricsEvaluator {
 
     @Override
     public <T> Boolean in(BoundReference<T> ref, Set<T> literalSet) {
+      Integer id = ref.fieldId();
+      Types.NestedField field = struct.field(id);
+      Preconditions.checkNotNull(field, "Cannot filter by nested column: %s", schema.findField(id));
+
+      if (canContainNulls(id)) {
+        return ROWS_MIGHT_NOT_MATCH;
+      }
+
+      if (lowerBounds != null && lowerBounds.containsKey(id) &&
+          upperBounds != null && upperBounds.containsKey(id)) {
+        // similar to the implementation in eq, first check if the lower bound is in the set
+        T lower = Conversions.fromByteBuffer(struct.field(id).type(), lowerBounds.get(id));
+        if (!literalSet.contains(lower)) {
+          return ROWS_MIGHT_NOT_MATCH;
+        }
+
+        // check if the upper bound is in the set
+        T upper = Conversions.fromByteBuffer(field.type(), upperBounds.get(id));
+        if (!literalSet.contains(upper)) {
+          return ROWS_MIGHT_NOT_MATCH;
+        }
+
+        // finally check if the lower bound and the upper bound are equal
+        if (ref.comparator().compare(lower, upper) != 0) {
+          return ROWS_MIGHT_NOT_MATCH;
+        }
+
+        // All values must be in the set if the lower bound and the upper bound are in the set and are equal.
+        return ROWS_MUST_MATCH;
+      }
+
       return ROWS_MIGHT_NOT_MATCH;
     }
 
     @Override
     public <T> Boolean notIn(BoundReference<T> ref, Set<T> literalSet) {
+      Integer id = ref.fieldId();
+      Types.NestedField field = struct.field(id);
+      Preconditions.checkNotNull(field, "Cannot filter by nested column: %s", schema.findField(id));
+
+      if (containsNullsOnly(id)) {
+        return ROWS_MUST_MATCH;
+      }
+
+      Collection<T> literals = literalSet;
+
+      if (lowerBounds != null && lowerBounds.containsKey(id)) {
+        T lower = Conversions.fromByteBuffer(struct.field(id).type(), lowerBounds.get(id));
+
+        literals = literals.stream().filter(v -> ref.comparator().compare(lower, v) <= 0).collect(Collectors.toList());
+        if (literals.isEmpty()) {  // if all values are less than lower bound, rows must match (notIn).
+          return ROWS_MUST_MATCH;
+        }
+      }
+
+      if (upperBounds != null && upperBounds.containsKey(id)) {
+        T upper = Conversions.fromByteBuffer(field.type(), upperBounds.get(id));
+        literals = literals.stream().filter(v -> ref.comparator().compare(upper, v) >= 0).collect(Collectors.toList());
+        if (literals.isEmpty()) { // if all remaining values are greater than upper bound, rows must match (notIn).
+          return ROWS_MUST_MATCH;
+        }
+      }
+
       return ROWS_MIGHT_NOT_MATCH;
     }
 
@@ -322,7 +383,7 @@ public class StrictMetricsEvaluator {
     }
 
     private boolean canContainNulls(Integer id) {
-      return nullCounts == null || nullCounts.containsKey(id) && nullCounts.get(id) > 0;
+      return nullCounts == null || (nullCounts.containsKey(id) && nullCounts.get(id) > 0);
     }
 
     private boolean containsNullsOnly(Integer id) {

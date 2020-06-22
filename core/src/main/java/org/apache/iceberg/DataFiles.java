@@ -19,8 +19,6 @@
 
 package org.apache.iceberg;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Locale;
@@ -30,6 +28,8 @@ import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptionKeyMetadata;
 import org.apache.iceberg.hadoop.HadoopInputFile;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.util.ByteBuffers;
 
@@ -159,6 +159,10 @@ public class DataFiles {
         FileFormat.AVRO,
         manifest.addedFilesCount() + manifest.existingFilesCount(),
         manifest.length());
+  }
+
+  public static DataFile fromManifestList(InputFile manifestList) {
+    return new GenericDataFile(manifestList.location(), FileFormat.AVRO, 1, manifestList.getLength());
   }
 
   public static Builder builder(PartitionSpec spec) {

@@ -19,10 +19,6 @@
 
 package org.apache.iceberg.types;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.List;
@@ -31,6 +27,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.apache.iceberg.relocated.com.google.common.base.Joiner;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.types.Type.NestedType;
 import org.apache.iceberg.types.Type.PrimitiveType;
 
@@ -457,8 +457,22 @@ public class Types {
       return isOptional;
     }
 
+    public NestedField asOptional() {
+      if (isOptional) {
+        return this;
+      }
+      return new NestedField(true, id, name, type, doc);
+    }
+
     public boolean isRequired() {
       return !isOptional;
+    }
+
+    public NestedField asRequired() {
+      if (!isOptional) {
+        return this;
+      }
+      return new NestedField(false, id, name, type, doc);
     }
 
     public int fieldId() {
@@ -611,37 +625,35 @@ public class Types {
 
     private Map<String, NestedField> lazyFieldsByName() {
       if (fieldsByName == null) {
-        indexFields();
+        ImmutableMap.Builder<String, NestedField> byNameBuilder = ImmutableMap.builder();
+        for (NestedField field : fields) {
+          byNameBuilder.put(field.name(), field);
+        }
+        fieldsByName = byNameBuilder.build();
       }
       return fieldsByName;
     }
 
     private Map<String, NestedField> lazyFieldsByLowerCaseName() {
       if (fieldsByLowerCaseName == null) {
-        indexFields();
+        ImmutableMap.Builder<String, NestedField> byLowerCaseNameBuilder = ImmutableMap.builder();
+        for (NestedField field : fields) {
+          byLowerCaseNameBuilder.put(field.name().toLowerCase(Locale.ROOT), field);
+        }
+        fieldsByLowerCaseName = byLowerCaseNameBuilder.build();
       }
       return fieldsByLowerCaseName;
     }
 
     private Map<Integer, NestedField> lazyFieldsById() {
       if (fieldsById == null) {
-        indexFields();
+        ImmutableMap.Builder<Integer, NestedField> byIdBuilder = ImmutableMap.builder();
+        for (NestedField field : fields) {
+          byIdBuilder.put(field.fieldId(), field);
+        }
+        this.fieldsById = byIdBuilder.build();
       }
       return fieldsById;
-    }
-
-    private void indexFields() {
-      ImmutableMap.Builder<String, NestedField> byNameBuilder = ImmutableMap.builder();
-      ImmutableMap.Builder<String, NestedField> byLowerCaseNameBuilder = ImmutableMap.builder();
-      ImmutableMap.Builder<Integer, NestedField> byIdBuilder = ImmutableMap.builder();
-      for (NestedField field : fields) {
-        byNameBuilder.put(field.name(), field);
-        byLowerCaseNameBuilder.put(field.name().toLowerCase(Locale.ROOT), field);
-        byIdBuilder.put(field.fieldId(), field);
-      }
-      this.fieldsByName = byNameBuilder.build();
-      this.fieldsByLowerCaseName = byLowerCaseNameBuilder.build();
-      this.fieldsById = byIdBuilder.build();
     }
   }
 

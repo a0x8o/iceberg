@@ -19,36 +19,50 @@
 
 package org.apache.iceberg.expressions;
 
-import com.google.common.base.Preconditions;
+import org.apache.iceberg.StructLike;
 
-public class BoundPredicate<T> extends Predicate<BoundReference<T>> {
-  private final Literal<T> literal;
-
-  BoundPredicate(Operation op, BoundReference<T> ref, Literal<T> lit) {
-    super(op, ref);
-    Preconditions.checkArgument(op != Operation.IN && op != Operation.NOT_IN,
-        "Bound predicate does not support %s operation", op);
-    this.literal = lit;
+public abstract class BoundPredicate<T> extends Predicate<T, BoundTerm<T>> implements Bound<Boolean> {
+  protected BoundPredicate(Operation op, BoundTerm<T> term) {
+    super(op, term);
   }
 
-  BoundPredicate(Operation op, BoundReference<T> ref) {
-    super(op, ref);
-    Preconditions.checkArgument(op == Operation.IS_NULL || op == Operation.NOT_NULL,
-        "Cannot create %s predicate without a value", op);
-    this.literal = null;
+  public boolean test(StructLike struct) {
+    return test(term().eval(struct));
+  }
+
+  public abstract boolean test(T value);
+
+  @Override
+  public Boolean eval(StructLike struct) {
+    return test(term().eval(struct));
   }
 
   @Override
-  public Expression negate() {
-    return new BoundPredicate<>(op().negate(), ref(), literal());
+  public BoundReference<?> ref() {
+    return term().ref();
   }
 
-  public Literal<T> literal() {
-    return literal;
+  public boolean isUnaryPredicate() {
+    return false;
   }
 
-  @Override
-  String literalString() {
-    return literal.toString();
+  public BoundUnaryPredicate<T> asUnaryPredicate() {
+    throw new IllegalStateException("Not a unary predicate: " + this);
+  }
+
+  public boolean isLiteralPredicate() {
+    return false;
+  }
+
+  public BoundLiteralPredicate<T> asLiteralPredicate() {
+    throw new IllegalStateException("Not a literal predicate: " + this);
+  }
+
+  public boolean isSetPredicate() {
+    return false;
+  }
+
+  public BoundSetPredicate<T> asSetPredicate() {
+    throw new IllegalStateException("Not a set predicate: " + this);
   }
 }

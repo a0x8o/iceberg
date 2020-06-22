@@ -23,16 +23,19 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.function.Function;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.exceptions.RuntimeIOException;
+import org.apache.iceberg.expressions.Binder;
+import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableGroup;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.CloseableIterator;
 import org.apache.iceberg.io.InputFile;
-import org.apache.orc.OrcFile;
 import org.apache.orc.Reader;
 import org.apache.orc.TypeDescription;
 import org.apache.orc.storage.ql.exec.vector.VectorizedRowBatch;
+import org.apache.orc.storage.ql.io.sarg.SearchArgument;
 
 /**
  * Iterable used to read rows from ORC.
@@ -43,51 +46,56 @@ class OrcIterable<T> extends CloseableGroup implements CloseableIterable<T> {
   private final InputFile file;
   private final Long start;
   private final Long length;
-  private final Function<Schema, OrcValueReader<?>> readerFunction;
+  private final Function<TypeDescription, OrcRowReader<?>> readerFunction;
+  private final Expression filter;
+  private final boolean caseSensitive;
 
   OrcIterable(InputFile file, Configuration config, Schema schema,
-                     Long start, Long length,
-                     Function<Schema, OrcValueReader<?>> readerFunction) {
+              Long start, Long length,
+              Function<TypeDescription, OrcRowReader<?>> readerFunction, boolean caseSensitive, Expression filter) {
     this.schema = schema;
     this.readerFunction = readerFunction;
     this.file = file;
     this.start = start;
     this.length = length;
     this.config = config;
+    this.caseSensitive = caseSensitive;
+    this.filter = (filter == Expressions.alwaysTrue()) ? null : filter;
   }
 
   @SuppressWarnings("unchecked")
   @Override
-  public Iterator<T> iterator() {
-    return new OrcIterator(
-        newOrcIterator(file, TypeConversion.toOrc(schema, new ColumnIdMap()),
-            start, length, newFileReader(file, config)),
-        readerFunction.apply(schema));
+  public CloseableIterator<T> iterator() {
+    Reader orcFileReader = ORC.newFileReader(file, config);
+    addCloseable(orcFileReader);
+    TypeDescription readOrcSchema = ORCSchemaUtil.buildOrcProjection(schema, orcFileReader.getSchema());
+
+    SearchArgument sarg = null;
+    if (filter != null) {
+      Expression boundFilter = Binder.bind(schema.asStruct(), filter, caseSensitive);
+      sarg = ExpressionToSearchArgument.convert(boundFilter, readOrcSchema);
+    }
+    Iterator<T> iterator = new OrcIterator(
+        newOrcIterator(file, readOrcSchema, start, length, orcFileReader, sarg),
+        readerFunction.apply(readOrcSchema));
+    return CloseableIterator.withClose(iterator);
   }
 
   private static VectorizedRowBatchIterator newOrcIterator(InputFile file,
                                                            TypeDescription readerSchema,
                                                            Long start, Long length,
-                                                           Reader orcFileReader) {
+                                                           Reader orcFileReader, SearchArgument sarg) {
     final Reader.Options options = orcFileReader.options();
     if (start != null) {
       options.range(start, length);
     }
     options.schema(readerSchema);
+    options.searchArgument(sarg, new String[]{});
 
     try {
       return new VectorizedRowBatchIterator(file.location(), readerSchema, orcFileReader.rows(options));
     } catch (IOException ioe) {
       throw new RuntimeIOException(ioe, "Failed to get ORC rows for file: %s", file);
-    }
-  }
-
-  private static Reader newFileReader(InputFile file, Configuration config) {
-    try {
-      return OrcFile.createReader(new Path(file.location()),
-          OrcFile.readerOptions(config));
-    } catch (IOException ioe) {
-      throw new RuntimeIOException(ioe, "Failed to open file: %s", file);
     }
   }
 
@@ -97,9 +105,9 @@ class OrcIterable<T> extends CloseableGroup implements CloseableIterable<T> {
     private VectorizedRowBatch current;
 
     private final VectorizedRowBatchIterator batchIter;
-    private final OrcValueReader<T> reader;
+    private final OrcRowReader<T> reader;
 
-    OrcIterator(VectorizedRowBatchIterator batchIter, OrcValueReader<T> reader) {
+    OrcIterator(VectorizedRowBatchIterator batchIter, OrcRowReader<T> reader) {
       this.batchIter = batchIter;
       this.reader = reader;
       current = null;

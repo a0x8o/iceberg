@@ -19,11 +19,11 @@
 
 package org.apache.iceberg.transforms;
 
-import com.google.common.base.Objects;
 import java.nio.ByteBuffer;
 import org.apache.iceberg.expressions.BoundPredicate;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.UnboundPredicate;
+import org.apache.iceberg.relocated.com.google.common.base.Objects;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 
@@ -61,11 +61,19 @@ class Identity<T> implements Transform<T, T> {
 
   @Override
   public UnboundPredicate<T> projectStrict(String name, BoundPredicate<T> predicate) {
-    if (predicate.literal() != null) {
-      return Expressions.predicate(predicate.op(), name, predicate.literal().value());
-    } else {
+    if (predicate.isUnaryPredicate()) {
       return Expressions.predicate(predicate.op(), name);
+    } else if (predicate.isLiteralPredicate()) {
+      return Expressions.predicate(predicate.op(), name, predicate.asLiteralPredicate().literal().value());
+    } else if (predicate.isSetPredicate()) {
+      return Expressions.predicate(predicate.op(), name, predicate.asSetPredicate().literalSet());
     }
+    return null;
+  }
+
+  @Override
+  public boolean isIdentity() {
+    return true;
   }
 
   @Override

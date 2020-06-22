@@ -19,8 +19,6 @@
 
 package org.apache.iceberg.spark.source;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
@@ -31,6 +29,8 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.hadoop.HadoopTables;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.spark.SparkTableUtil;
 import org.apache.iceberg.spark.SparkTableUtil.SparkPartition;
 import org.apache.iceberg.types.Types;
@@ -193,6 +193,51 @@ public class TestSparkTableUtilWithInMemoryCatalog {
   @Test
   public void testImportPartitions() throws IOException {
     Table table = TABLES.create(SCHEMA, SPEC, tableLocation);
+
+    List<SimpleRecord> records = Lists.newArrayList(
+        new SimpleRecord(1, "a"),
+        new SimpleRecord(2, "b"),
+        new SimpleRecord(3, "c")
+    );
+
+    File parquetTableDir = temp.newFolder("parquet_table");
+    String parquetTableLocation = parquetTableDir.toURI().toString();
+
+    try {
+      Dataset<Row> inputDF = spark.createDataFrame(records, SimpleRecord.class);
+      inputDF.select("id", "data").write()
+          .format("parquet")
+          .mode("append")
+          .option("path", parquetTableLocation)
+          .partitionBy("data")
+          .saveAsTable("parquet_table");
+
+      File stagingDir = temp.newFolder("staging-dir");
+      Seq<SparkPartition> partitions = SparkTableUtil.getPartitionsByFilter(spark, "parquet_table", "data = 'a'");
+      SparkTableUtil.importSparkPartitions(spark, partitions, table, table.spec(), stagingDir.toString());
+
+      List<SimpleRecord> expectedRecords = Lists.newArrayList(new SimpleRecord(1, "a"));
+
+      List<SimpleRecord> actualRecords = spark.read()
+          .format("iceberg")
+          .load(tableLocation)
+          .orderBy("id")
+          .as(Encoders.bean(SimpleRecord.class))
+          .collectAsList();
+
+      Assert.assertEquals("Result rows should match", expectedRecords, actualRecords);
+    } finally {
+      spark.sql("DROP TABLE parquet_table");
+    }
+  }
+
+  @Test
+  public void testImportPartitionsWithSnapshotInheritance() throws IOException {
+    Table table = TABLES.create(SCHEMA, SPEC, tableLocation);
+
+    table.updateProperties()
+        .set(TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED, "true")
+        .commit();
 
     List<SimpleRecord> records = Lists.newArrayList(
         new SimpleRecord(1, "a"),

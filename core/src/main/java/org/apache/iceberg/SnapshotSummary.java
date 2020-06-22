@@ -19,11 +19,11 @@
 
 package org.apache.iceberg;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import java.util.Map;
 import java.util.Set;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 
 public class SnapshotSummary {
   public static final String ADDED_FILES_PROP = "added-data-files";
@@ -34,6 +34,10 @@ public class SnapshotSummary {
   public static final String TOTAL_RECORDS_PROP = "total-records";
   public static final String DELETED_DUPLICATE_FILES = "deleted-duplicate-files";
   public static final String CHANGED_PARTITION_COUNT_PROP = "changed-partition-count";
+  public static final String STAGED_WAP_ID_PROP = "wap.id";
+  public static final String PUBLISHED_WAP_ID_PROP = "published-wap-id";
+  public static final String SOURCE_SNAPSHOT_ID_PROP = "source-snapshot-id";
+  public static final String REPLACE_PARTITIONS_PROP = "replace-partitions";
 
   private SnapshotSummary() {
   }
@@ -65,6 +69,18 @@ public class SnapshotSummary {
       this.deletedDuplicateFiles += 1;
     }
 
+    public void incrementDuplicateDeletes(int increment) {
+      this.deletedDuplicateFiles += increment;
+    }
+
+    public void deletedFile(PartitionSpec spec, ContentFile<?> file) {
+      if (file instanceof DataFile) {
+        deletedFile(spec, (DataFile) file);
+      } else {
+        throw new IllegalArgumentException("Unsupported file type: " + file.getClass().getSimpleName());
+      }
+    }
+
     public void deletedFile(PartitionSpec spec, DataFile file) {
       changedPartitions.add(spec.partitionToPath(file.partition()));
       this.deletedFiles += 1;
@@ -75,6 +91,16 @@ public class SnapshotSummary {
       changedPartitions.add(spec.partitionToPath(file.partition()));
       this.addedFiles += 1;
       this.addedRecords += file.recordCount();
+    }
+
+    public void addedManifest(ManifestFile manifest) {
+      this.addedFiles += manifest.addedFilesCount();
+      this.addedRecords += manifest.addedRowsCount();
+    }
+
+    public void deletedManifest(ManifestFile manifest) {
+      this.deletedFiles += manifest.deletedFilesCount();
+      this.deletedRecords += manifest.deletedRowsCount();
     }
 
     public void set(String property, String value) {

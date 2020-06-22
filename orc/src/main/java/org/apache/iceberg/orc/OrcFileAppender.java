@@ -19,22 +19,22 @@
 
 package org.apache.iceberg.orc;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.Metrics;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.exceptions.RuntimeIOException;
+import org.apache.iceberg.hadoop.HadoopOutputFile;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.OutputFile;
-import org.apache.orc.ColumnStatistics;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.orc.OrcFile;
 import org.apache.orc.Reader;
 import org.apache.orc.StripeInformation;
@@ -47,31 +47,33 @@ import org.apache.orc.storage.ql.exec.vector.VectorizedRowBatch;
  */
 class OrcFileAppender<D> implements FileAppender<D> {
   private final int batchSize;
-  private final TypeDescription orcSchema;
-  private final ColumnIdMap columnIds = new ColumnIdMap();
-  private final Path path;
+  private final Schema schema;
+  private final OutputFile file;
   private final Writer writer;
   private final VectorizedRowBatch batch;
   private final OrcValueWriter<D> valueWriter;
   private boolean isClosed = false;
   private final Configuration conf;
 
-  private static final String COLUMN_NUMBERS_ATTRIBUTE = "iceberg.column.ids";
-
-  OrcFileAppender(TypeDescription schema, OutputFile file,
+  OrcFileAppender(Schema schema, OutputFile file,
                   Function<TypeDescription, OrcValueWriter<?>> createWriterFunc,
                   Configuration conf, Map<String, byte[]> metadata,
                   int batchSize) {
     this.conf = conf;
-    orcSchema = schema;
-    path = new Path(file.location());
+    this.file = file;
     this.batchSize = batchSize;
-    batch = orcSchema.createRowBatch(this.batchSize);
+    this.schema = schema;
 
-    OrcFile.WriterOptions options = OrcFile.writerOptions(conf);
+    TypeDescription orcSchema = ORCSchemaUtil.convert(this.schema);
+    this.batch = orcSchema.createRowBatch(this.batchSize);
+
+    OrcFile.WriterOptions options = OrcFile.writerOptions(conf).useUTCTimestamp(true);
+    if (file instanceof HadoopOutputFile) {
+      options.fileSystem(((HadoopOutputFile) file).getFileSystem());
+    }
     options.setSchema(orcSchema);
-    writer = newOrcWriter(file, columnIds, options, metadata);
-    valueWriter = newOrcValueWriter(orcSchema, createWriterFunc);
+    this.writer = newOrcWriter(file, options, metadata);
+    this.valueWriter = newOrcValueWriter(orcSchema, createWriterFunc);
   }
 
   @Override
@@ -82,38 +84,16 @@ class OrcFileAppender<D> implements FileAppender<D> {
         writer.addRowBatch(batch);
         batch.reset();
       }
-    } catch (IOException e) {
-      throw new RuntimeException("Problem writing to ORC file " + path, e);
+    } catch (IOException ioe) {
+      throw new RuntimeIOException(ioe, "Problem writing to ORC file " + file.location());
     }
   }
 
   @Override
   public Metrics metrics() {
-    try {
-      long rows = writer.getNumberOfRows();
-      ColumnStatistics[] stats = writer.getStatistics();
-      // we don't currently have columnSizes or distinct counts.
-      Map<Integer, Long> valueCounts = new HashMap<>();
-      Map<Integer, Long> nullCounts = new HashMap<>();
-      Integer[] icebergIds = new Integer[orcSchema.getMaximumId() + 1];
-      for (TypeDescription type : columnIds.keySet()) {
-        icebergIds[type.getId()] = columnIds.get(type);
-      }
-      for (int c = 1; c < stats.length; ++c) {
-        if (icebergIds[c] != null) {
-          valueCounts.put(icebergIds[c], stats[c].getNumberOfValues());
-        }
-      }
-      for (TypeDescription child : orcSchema.getChildren()) {
-        int childId = child.getId();
-        if (icebergIds[childId] != null) {
-          nullCounts.put(icebergIds[childId], rows - stats[childId].getNumberOfValues());
-        }
-      }
-      return new Metrics(rows, null, valueCounts, nullCounts);
-    } catch (IOException e) {
-      throw new RuntimeException("Can't get statistics " + path, e);
-    }
+    Preconditions.checkState(isClosed,
+        "Cannot return metrics while appending to an open file.");
+    return OrcMetrics.fromWriter(writer);
   }
 
   @Override
@@ -126,14 +106,12 @@ class OrcFileAppender<D> implements FileAppender<D> {
   @Override
   public List<Long> splitOffsets() {
     Preconditions.checkState(isClosed, "File is not yet closed");
-    Reader reader;
-    try {
-      reader = OrcFile.createReader(path, new OrcFile.ReaderOptions(conf));
+    try (Reader reader = ORC.newFileReader(file.toInputFile(), conf)) {
+      List<StripeInformation> stripes = reader.getStripes();
+      return Collections.unmodifiableList(Lists.transform(stripes, StripeInformation::getOffset));
     } catch (IOException e) {
-      throw new RuntimeIOException("Cannot read file " + path, e);
+      throw new RuntimeIOException(e, "Can't close ORC reader %s", file.location());
     }
-    List<StripeInformation> stripes = reader.getStripes();
-    return Collections.unmodifiableList(Lists.transform(stripes, StripeInformation::getOffset));
   }
 
   @Override
@@ -152,18 +130,16 @@ class OrcFileAppender<D> implements FileAppender<D> {
   }
 
   private static Writer newOrcWriter(OutputFile file,
-                                     ColumnIdMap columnIds,
                                      OrcFile.WriterOptions options, Map<String, byte[]> metadata) {
     final Path locPath = new Path(file.location());
     final Writer writer;
 
     try {
       writer = OrcFile.createWriter(locPath, options);
-    } catch (IOException e) {
-      throw new RuntimeException("Can't create file " + locPath, e);
+    } catch (IOException ioe) {
+      throw new RuntimeIOException(ioe, "Can't create file " + locPath);
     }
 
-    writer.addUserMetadata(COLUMN_NUMBERS_ATTRIBUTE, columnIds.serialize());
     metadata.forEach((key, value) -> writer.addUserMetadata(key, ByteBuffer.wrap(value)));
 
     return writer;

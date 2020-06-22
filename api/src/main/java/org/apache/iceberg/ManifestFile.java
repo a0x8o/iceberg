@@ -30,19 +30,45 @@ import static org.apache.iceberg.types.Types.NestedField.required;
  * Represents a manifest file that can be scanned to find data files in a table.
  */
 public interface ManifestFile {
+  Types.NestedField PATH = required(500, "manifest_path", Types.StringType.get(), "Location URI with FS scheme");
+  Types.NestedField LENGTH = required(501, "manifest_length", Types.LongType.get(), "Total file size in bytes");
+  Types.NestedField SPEC_ID = required(502, "partition_spec_id", Types.IntegerType.get(), "Spec ID used to write");
+  Types.NestedField MANIFEST_CONTENT = optional(517, "content", Types.IntegerType.get(),
+      "Contents of the manifest: 0=data, 1=deletes");
+  Types.NestedField SEQUENCE_NUMBER = optional(515, "sequence_number", Types.LongType.get(),
+      "Sequence number when the manifest was added");
+  Types.NestedField MIN_SEQUENCE_NUMBER = optional(516, "min_sequence_number", Types.LongType.get(),
+      "Lowest sequence number in the manifest");
+  Types.NestedField SNAPSHOT_ID = optional(503, "added_snapshot_id", Types.LongType.get(),
+      "Snapshot ID that added the manifest");
+  Types.NestedField ADDED_FILES_COUNT = optional(504, "added_data_files_count", Types.IntegerType.get(),
+      "Added entry count");
+  Types.NestedField EXISTING_FILES_COUNT = optional(505, "existing_data_files_count", Types.IntegerType.get(),
+      "Existing entry count");
+  Types.NestedField DELETED_FILES_COUNT = optional(506, "deleted_data_files_count", Types.IntegerType.get(),
+      "Deleted entry count");
+  Types.NestedField ADDED_ROWS_COUNT = optional(512, "added_rows_count", Types.LongType.get(),
+      "Added rows count");
+  Types.NestedField EXISTING_ROWS_COUNT = optional(513, "existing_rows_count", Types.LongType.get(),
+      "Existing rows count");
+  Types.NestedField DELETED_ROWS_COUNT = optional(514, "deleted_rows_count", Types.LongType.get(),
+      "Deleted rows count");
+  Types.StructType PARTITION_SUMMARY_TYPE = Types.StructType.of(
+      required(509, "contains_null", Types.BooleanType.get(), "True if any file has a null partition value"),
+      optional(510, "lower_bound", Types.BinaryType.get(), "Partition lower bound for all files"),
+      optional(511, "upper_bound", Types.BinaryType.get(), "Partition upper bound for all files")
+  );
+  Types.NestedField PARTITION_SUMMARIES = optional(507, "partitions",
+      Types.ListType.ofRequired(508, PARTITION_SUMMARY_TYPE),
+      "Summary for each partition");
+  // next ID to assign: 518
+
   Schema SCHEMA = new Schema(
-      required(500, "manifest_path", Types.StringType.get()),
-      required(501, "manifest_length", Types.LongType.get()),
-      required(502, "partition_spec_id", Types.IntegerType.get()),
-      optional(503, "added_snapshot_id", Types.LongType.get()),
-      optional(504, "added_data_files_count", Types.IntegerType.get()),
-      optional(505, "existing_data_files_count", Types.IntegerType.get()),
-      optional(506, "deleted_data_files_count", Types.IntegerType.get()),
-      optional(507, "partitions", Types.ListType.ofRequired(508, Types.StructType.of(
-          required(509, "contains_null", Types.BooleanType.get()),
-          optional(510, "lower_bound", Types.BinaryType.get()), // null if no non-null values
-          optional(511, "upper_bound", Types.BinaryType.get())
-      ))));
+      PATH, LENGTH, SPEC_ID, MANIFEST_CONTENT,
+      SEQUENCE_NUMBER, MIN_SEQUENCE_NUMBER, SNAPSHOT_ID,
+      ADDED_FILES_COUNT, EXISTING_FILES_COUNT, DELETED_FILES_COUNT,
+      ADDED_ROWS_COUNT, EXISTING_ROWS_COUNT, DELETED_ROWS_COUNT,
+      PARTITION_SUMMARIES);
 
   static Schema schema() {
     return SCHEMA;
@@ -64,6 +90,21 @@ public interface ManifestFile {
   int partitionSpecId();
 
   /**
+   * @return the content stored in the manifest; either DATA or DELETES
+   */
+  ManifestContent content();
+
+  /**
+   * @return the sequence number of the commit that added the manifest file
+   */
+  long sequenceNumber();
+
+  /**
+   * @return the lowest sequence number of any data file in the manifest
+   */
+  long minSequenceNumber();
+
+  /**
    * @return ID of the snapshot that added the manifest file to table metadata
    */
   Long snapshotId();
@@ -83,6 +124,11 @@ public interface ManifestFile {
   Integer addedFilesCount();
 
   /**
+   * @return the total number of rows in all data files with status ADDED in the manifest file
+   */
+  Long addedRowsCount();
+
+  /**
    * Returns true if the manifest contains EXISTING entries or if the count is not known.
    *
    * @return whether this manifest contains entries with EXISTING status
@@ -97,6 +143,11 @@ public interface ManifestFile {
   Integer existingFilesCount();
 
   /**
+   * @return the total number of rows in all data files with status EXISTING in the manifest file
+   */
+  Long existingRowsCount();
+
+  /**
    * Returns true if the manifest contains DELETED entries or if the count is not known.
    *
    * @return whether this manifest contains entries with DELETED status
@@ -109,6 +160,11 @@ public interface ManifestFile {
    * @return the number of data files with status DELETED in the manifest file
    */
   Integer deletedFilesCount();
+
+  /**
+   * @return the total number of rows in all data files with status DELETED in the manifest file
+   */
+  Long deletedRowsCount();
 
   /**
    * Returns a list of {@link PartitionFieldSummary partition field summaries}.
@@ -134,14 +190,8 @@ public interface ManifestFile {
    * Summarizes the values of one partition field stored in a manifest file.
    */
   interface PartitionFieldSummary {
-    Types.StructType TYPE = ManifestFile.schema()
-        .findType("partitions")
-        .asListType()
-        .elementType()
-        .asStructType();
-
     static Types.StructType getType() {
-      return TYPE;
+      return PARTITION_SUMMARY_TYPE;
     }
 
     /**

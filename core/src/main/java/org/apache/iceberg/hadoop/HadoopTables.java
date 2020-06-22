@@ -19,12 +19,13 @@
 
 package org.apache.iceberg.hadoop;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import java.util.Map;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.iceberg.AllDataFilesTable;
+import org.apache.iceberg.AllEntriesTable;
+import org.apache.iceberg.AllManifestsTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.DataFilesTable;
 import org.apache.iceberg.HistoryTable;
@@ -32,6 +33,7 @@ import org.apache.iceberg.ManifestEntriesTable;
 import org.apache.iceberg.ManifestsTable;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.PartitionsTable;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SnapshotsTable;
 import org.apache.iceberg.Table;
@@ -40,6 +42,8 @@ import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.Tables;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 
 /**
  * Implementation of Iceberg tables that uses the Hadoop FileSystem
@@ -106,6 +110,14 @@ public class HadoopTables implements Tables, Configurable {
         return new SnapshotsTable(ops, baseTable);
       case MANIFESTS:
         return new ManifestsTable(ops, baseTable);
+      case PARTITIONS:
+        return new PartitionsTable(ops, baseTable);
+      case ALL_DATA_FILES:
+        return new AllDataFilesTable(ops, baseTable);
+      case ALL_MANIFESTS:
+        return new AllManifestsTable(ops, baseTable);
+      case ALL_ENTRIES:
+        return new AllEntriesTable(ops, baseTable);
       default:
         throw new NoSuchTableException(String.format("Unknown metadata table type: %s for %s", type, location));
     }
@@ -133,7 +145,7 @@ public class HadoopTables implements Tables, Configurable {
 
     Map<String, String> tableProps = properties == null ? ImmutableMap.of() : properties;
     PartitionSpec partitionSpec = spec == null ? PartitionSpec.unpartitioned() : spec;
-    TableMetadata metadata = TableMetadata.newTableMetadata(ops, schema, partitionSpec, location, tableProps);
+    TableMetadata metadata = TableMetadata.newTableMetadata(schema, partitionSpec, location, tableProps);
     ops.commit(null, metadata);
 
     return new BaseTable(ops, location);

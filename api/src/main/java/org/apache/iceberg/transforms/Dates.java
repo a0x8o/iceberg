@@ -24,13 +24,12 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import org.apache.iceberg.expressions.BoundPredicate;
+import org.apache.iceberg.expressions.BoundTransform;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.UnboundPredicate;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
-
-import static org.apache.iceberg.expressions.Expression.Operation.IS_NULL;
-import static org.apache.iceberg.expressions.Expression.Operation.NOT_NULL;
 
 enum Dates implements Transform<Integer, Integer> {
   YEAR(ChronoUnit.YEARS, "year"),
@@ -74,18 +73,34 @@ enum Dates implements Transform<Integer, Integer> {
 
   @Override
   public UnboundPredicate<Integer> project(String fieldName, BoundPredicate<Integer> pred) {
-    if (pred.op() == NOT_NULL || pred.op() == IS_NULL) {
-      return Expressions.predicate(pred.op(), fieldName);
+    if (pred.term() instanceof BoundTransform) {
+      return ProjectionUtil.projectTransformPredicate(this, name, pred);
     }
-    return ProjectionUtil.truncateInteger(fieldName, pred, this);
+
+    if (pred.isUnaryPredicate()) {
+      return Expressions.predicate(pred.op(), fieldName);
+    } else if (pred.isLiteralPredicate()) {
+      return ProjectionUtil.truncateInteger(fieldName, pred.asLiteralPredicate(), this);
+    } else if (pred.isSetPredicate() && pred.op() == Expression.Operation.IN) {
+      return ProjectionUtil.transformSet(fieldName, pred.asSetPredicate(), this);
+    }
+    return null;
   }
 
   @Override
   public UnboundPredicate<Integer> projectStrict(String fieldName, BoundPredicate<Integer> pred) {
-    if (pred.op() == NOT_NULL || pred.op() == IS_NULL) {
-      return Expressions.predicate(pred.op(), fieldName);
+    if (pred.term() instanceof BoundTransform) {
+      return ProjectionUtil.projectTransformPredicate(this, name, pred);
     }
-    return ProjectionUtil.truncateIntegerStrict(fieldName, pred, this);
+
+    if (pred.isUnaryPredicate()) {
+      return Expressions.predicate(pred.op(), fieldName);
+    } else if (pred.isLiteralPredicate()) {
+      return ProjectionUtil.truncateIntegerStrict(fieldName, pred.asLiteralPredicate(), this);
+    } else if (pred.isSetPredicate() && pred.op() == Expression.Operation.NOT_IN) {
+      return ProjectionUtil.transformSet(fieldName, pred.asSetPredicate(), this);
+    }
+    return null;
   }
 
   @Override

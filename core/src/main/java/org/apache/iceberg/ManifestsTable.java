@@ -19,8 +19,8 @@
 
 package org.apache.iceberg;
 
-import com.google.common.collect.Lists;
 import java.util.List;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
 
@@ -65,12 +65,7 @@ public class ManifestsTable extends BaseMetadataTable {
 
   @Override
   public TableScan newScan() {
-    return new SnapshotsTableScan();
-  }
-
-  @Override
-  public String location() {
-    return ops.current().file().location();
+    return new ManifestsTableScan();
   }
 
   @Override
@@ -79,19 +74,20 @@ public class ManifestsTable extends BaseMetadataTable {
   }
 
   protected DataTask task(TableScan scan) {
+    String location = scan.snapshot().manifestListLocation();
     return StaticDataTask.of(
-        ops.io().newInputFile(scan.snapshot().manifestListLocation()),
-        scan.snapshot().manifests(),
-        this::manifestFileToRow);
+        ops.io().newInputFile(location != null ? location : ops.current().metadataFileLocation()),
+        scan.snapshot().allManifests(),
+        manifest -> ManifestsTable.manifestFileToRow(spec, manifest));
   }
 
-  private class SnapshotsTableScan extends StaticTableScan {
-    SnapshotsTableScan() {
+  private class ManifestsTableScan extends StaticTableScan {
+    ManifestsTableScan() {
       super(ops, table, SNAPSHOT_SCHEMA, ManifestsTable.this::task);
     }
   }
 
-  private StaticDataTask.Row manifestFileToRow(ManifestFile manifest) {
+  static StaticDataTask.Row manifestFileToRow(PartitionSpec spec, ManifestFile manifest) {
     return StaticDataTask.Row.of(
         manifest.path(),
         manifest.length(),
@@ -100,11 +96,16 @@ public class ManifestsTable extends BaseMetadataTable {
         manifest.addedFilesCount(),
         manifest.existingFilesCount(),
         manifest.deletedFilesCount(),
-        partitionSummariesToRows(manifest.partitions())
+        partitionSummariesToRows(spec, manifest.partitions())
     );
   }
 
-  private List<StaticDataTask.Row> partitionSummariesToRows(List<ManifestFile.PartitionFieldSummary> summaries) {
+  static List<StaticDataTask.Row> partitionSummariesToRows(PartitionSpec spec,
+                                                           List<ManifestFile.PartitionFieldSummary> summaries) {
+    if (summaries == null) {
+      return null;
+    }
+
     List<StaticDataTask.Row> rows = Lists.newArrayList();
 
     for (int i = 0; i < spec.fields().size(); i += 1) {

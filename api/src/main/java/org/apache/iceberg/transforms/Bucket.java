@@ -19,19 +19,21 @@
 
 package org.apache.iceberg.transforms;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Objects;
-import com.google.common.collect.Sets;
-import com.google.common.hash.HashFunction;
-import com.google.common.hash.Hashing;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.UUID;
 import org.apache.iceberg.expressions.BoundPredicate;
+import org.apache.iceberg.expressions.BoundTransform;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.UnboundPredicate;
+import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
+import org.apache.iceberg.relocated.com.google.common.base.Objects;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.relocated.com.google.common.hash.HashFunction;
+import org.apache.iceberg.relocated.com.google.common.hash.Hashing;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 
@@ -109,32 +111,42 @@ abstract class Bucket<T> implements Transform<T, Integer> {
 
   @Override
   public UnboundPredicate<Integer> project(String name, BoundPredicate<T> predicate) {
-    switch (predicate.op()) {
-      case EQ:
-        return Expressions.predicate(
-            predicate.op(), name, apply(predicate.literal().value()));
-//      case IN:
-//        return Expressions.predicate();
-      case STARTS_WITH:
-      default:
-        // comparison predicates can't be projected, notEq can't be projected
-        // TODO: small ranges can be projected.
-        // for example, (x > 0) and (x < 3) can be turned into in({1, 2}) and projected.
-        return null;
+    if (predicate.term() instanceof BoundTransform) {
+      return ProjectionUtil.projectTransformPredicate(this, name, predicate);
     }
+
+    if (predicate.isUnaryPredicate()) {
+      return Expressions.predicate(predicate.op(), name);
+    } else if (predicate.isLiteralPredicate() && predicate.op() == Expression.Operation.EQ) {
+      return Expressions.predicate(
+          predicate.op(), name, apply(predicate.asLiteralPredicate().literal().value()));
+    } else if (predicate.isSetPredicate() && predicate.op() == Expression.Operation.IN) { // notIn can't be projected
+      return ProjectionUtil.transformSet(name, predicate.asSetPredicate(), this);
+    }
+
+    // comparison predicates can't be projected, notEq can't be projected
+    // TODO: small ranges can be projected.
+    // for example, (x > 0) and (x < 3) can be turned into in({1, 2}) and projected.
+    return null;
   }
 
   @Override
   public UnboundPredicate<Integer> projectStrict(String name, BoundPredicate<T> predicate) {
-    switch (predicate.op()) {
-      case NOT_EQ: // TODO: need to translate not(eq(...)) into notEq in expressions
-        return Expressions.predicate(predicate.op(), name, apply(predicate.literal().value()));
-//      case NOT_IN:
-//        return null;
-      default:
-        // no strict projection for comparison or equality
-        return null;
+    if (predicate.term() instanceof BoundTransform) {
+      return ProjectionUtil.projectTransformPredicate(this, name, predicate);
     }
+
+    if (predicate.isUnaryPredicate()) {
+      return Expressions.predicate(predicate.op(), name);
+    } else if (predicate.isLiteralPredicate() && predicate.op() == Expression.Operation.NOT_EQ) {
+      // TODO: need to translate not(eq(...)) into notEq in expressions
+      return Expressions.predicate(predicate.op(), name, apply(predicate.asLiteralPredicate().literal().value()));
+    } else if (predicate.isSetPredicate() && predicate.op() == Expression.Operation.NOT_IN) {
+      return ProjectionUtil.transformSet(name, predicate.asSetPredicate(), this);
+    }
+
+    // no strict projection for comparison or equality
+    return null;
   }
 
   @Override
@@ -226,25 +238,6 @@ abstract class Bucket<T> implements Transform<T, Integer> {
     @Override
     public boolean canTransform(Type type) {
       return type.typeId() == TypeID.STRING;
-    }
-  }
-
-  private static class BucketBytes extends Bucket<byte[]> {
-    private static final Set<TypeID> SUPPORTED_TYPES = Sets.newHashSet(
-        TypeID.BINARY, TypeID.FIXED);
-
-    private BucketBytes(int numBuckets) {
-      super(numBuckets);
-    }
-
-    @Override
-    public int hash(byte[] value) {
-      return MURMUR3.hashBytes(value).asInt();
-    }
-
-    @Override
-    public boolean canTransform(Type type) {
-      return SUPPORTED_TYPES.contains(type.typeId());
     }
   }
 

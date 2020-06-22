@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.hive;
 
-import com.google.common.collect.Lists;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
@@ -33,12 +32,14 @@ import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.Files;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.avro.Avro;
 import org.apache.iceberg.avro.AvroSchemaUtil;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.io.FileAppender;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
 import org.apache.thrift.TException;
 import org.junit.Assert;
@@ -47,6 +48,8 @@ import org.junit.Test;
 import static org.apache.iceberg.BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE;
 import static org.apache.iceberg.BaseMetastoreTableOperations.METADATA_LOCATION_PROP;
 import static org.apache.iceberg.BaseMetastoreTableOperations.TABLE_TYPE_PROP;
+import static org.apache.iceberg.types.Types.NestedField.optional;
+import static org.apache.iceberg.types.Types.NestedField.required;
 
 public class HiveTableTest extends HiveTableBaseTest {
   @Test
@@ -197,7 +200,7 @@ public class HiveTableTest extends HiveTableBaseTest {
 
     String manifestListLocation = table.currentSnapshot().manifestListLocation().replace("file:", "");
 
-    List<ManifestFile> manifests = table.currentSnapshot().manifests();
+    List<ManifestFile> manifests = table.currentSnapshot().allManifests();
 
     Assert.assertTrue("Drop (table and data) should return true and drop the table",
         catalog.dropTable(TABLE_IDENTIFIER));
@@ -214,7 +217,8 @@ public class HiveTableTest extends HiveTableBaseTest {
           new File(manifest.path().replace("file:", "")).exists());
     }
     Assert.assertFalse("Table metadata file should not exist",
-        new File(((HasTableOperations) table).operations().current().file().location().replace("file:", "")).exists());
+        new File(((HasTableOperations) table).operations().current()
+            .metadataFileLocation().replace("file:", "")).exists());
   }
 
   @Test
@@ -240,6 +244,35 @@ public class HiveTableTest extends HiveTableBaseTest {
     Assert.assertEquals(icebergColumns, hiveColumns);
   }
 
+  @Test
+  public void testColumnTypeChangeInMetastore() throws TException {
+    Table icebergTable = catalog.loadTable(TABLE_IDENTIFIER);
+
+    Schema expectedSchema = new Schema(Types.StructType.of(
+            required(1, "id", Types.LongType.get()),
+            optional(2, "data", Types.LongType.get()),
+            optional(3, "string", Types.StringType.get()),
+            optional(4, "int", Types.IntegerType.get())).fields());
+    // Add columns with different types, then verify we could delete one column in hive metastore
+    // as hive conf METASTORE_DISALLOW_INCOMPATIBLE_COL_TYPE_CHANGES was set to false. If this was set to true,
+    // an InvalidOperationException would thrown in method MetaStoreUtils#throwExceptionIfIncompatibleColTypeChange()
+    icebergTable.updateSchema()
+            .addColumn("data", Types.LongType.get())
+            .addColumn("string", Types.StringType.get())
+            .addColumn("int", Types.IntegerType.get())
+            .commit();
+
+    Assert.assertEquals("Schema should match expected", expectedSchema.asStruct(), icebergTable.schema().asStruct());
+
+    expectedSchema = new Schema(Types.StructType.of(
+            required(1, "id", Types.LongType.get()),
+            optional(2, "data", Types.LongType.get()),
+            optional(4, "int", Types.IntegerType.get())).fields());
+    icebergTable.updateSchema().deleteColumn("string").commit();
+
+    Assert.assertEquals("Schema should match expected", expectedSchema.asStruct(), icebergTable.schema().asStruct());
+  }
+
   @Test(expected = CommitFailedException.class)
   public void testFailure() throws TException {
     Table icebergTable = catalog.loadTable(TABLE_IDENTIFIER);
@@ -250,5 +283,16 @@ public class HiveTableTest extends HiveTableBaseTest {
     icebergTable.updateSchema()
         .addColumn("data", Types.LongType.get())
         .commit();
+  }
+
+  @Test
+  public void testListTables() {
+    List<TableIdentifier> tableIdents = catalog.listTables(TABLE_IDENTIFIER.namespace());
+    List<TableIdentifier> expectedIdents = tableIdents.stream()
+        .filter(t -> t.namespace().level(0).equals(DB_NAME) && t.name().equals(TABLE_NAME))
+        .collect(Collectors.toList());
+
+    Assert.assertEquals(1, expectedIdents.size());
+    Assert.assertTrue(catalog.tableExists(TABLE_IDENTIFIER));
   }
 }

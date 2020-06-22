@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.parquet;
 
-import com.google.common.collect.ImmutableMap;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
@@ -34,6 +33,7 @@ import org.apache.iceberg.common.DynMethods;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.parquet.bytes.ByteBufferAllocator;
 import org.apache.parquet.column.ColumnWriteStore;
 import org.apache.parquet.column.ParquetProperties;
@@ -44,13 +44,15 @@ import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.schema.MessageType;
 
 class ParquetWriter<T> implements FileAppender<T>, Closeable {
-  private static final DynConstructors.Ctor<PageWriteStore> pageStoreCtor = DynConstructors
-      .builder(PageWriteStore.class)
-      .hiddenImpl("org.apache.parquet.hadoop.ColumnChunkPageWriteStore",
-          CodecFactory.BytesCompressor.class,
-          MessageType.class,
-          ByteBufferAllocator.class)
-      .build();
+
+  private static DynConstructors.Ctor<PageWriteStore> pageStoreCtorParquet = DynConstructors
+          .builder(PageWriteStore.class)
+          .hiddenImpl("org.apache.parquet.hadoop.ColumnChunkPageWriteStore",
+              CodecFactory.BytesCompressor.class,
+              MessageType.class,
+              ByteBufferAllocator.class,
+              int.class)
+          .build();
 
   private static final DynMethods.UnboundMethod flushToWriter = DynMethods
       .builder("flushToFileWriter")
@@ -65,12 +67,16 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
   private final ParquetValueWriter<T> model;
   private final ParquetFileWriter writer;
   private final MetricsConfig metricsConfig;
+  private final int columnIndexTruncateLength;
 
   private DynMethods.BoundMethod flushPageStoreToWriter;
   private ColumnWriteStore writeStore;
   private long nextRowGroupSize = 0;
   private long recordCount = 0;
   private long nextCheckRecordCount = 10;
+
+  private static final String COLUMN_INDEX_TRUNCATE_LENGTH = "parquet.columnindex.truncate.length";
+  private static final int DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH = 64;
 
   @SuppressWarnings("unchecked")
   ParquetWriter(Configuration conf, OutputFile output, Schema schema, long rowGroupSize,
@@ -87,6 +93,7 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
     this.parquetSchema = ParquetSchemaUtil.convert(schema, "table");
     this.model = (ParquetValueWriter<T>) createWriterFunc.apply(parquetSchema);
     this.metricsConfig = metricsConfig;
+    this.columnIndexTruncateLength = conf.getInt(COLUMN_INDEX_TRUNCATE_LENGTH, DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH);
 
     try {
       this.writer = new ParquetFileWriter(ParquetIO.file(output, conf), parquetSchema,
@@ -120,7 +127,7 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
   @Override
   public long length() {
     try {
-      return writer.getPos() + writeStore.getBufferedSize();
+      return writer.getPos() + (writeStore.isColumnFlushNeeded() ? writeStore.getBufferedSize() : 0);
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to get file length");
     }
@@ -171,8 +178,8 @@ class ParquetWriter<T> implements FileAppender<T>, Closeable {
     this.nextCheckRecordCount = Math.min(Math.max(recordCount / 2, 100), 10000);
     this.recordCount = 0;
 
-    PageWriteStore pageStore = pageStoreCtor.newInstance(
-        compressor, parquetSchema, props.getAllocator());
+    PageWriteStore pageStore = pageStoreCtorParquet.newInstance(
+        compressor, parquetSchema, props.getAllocator(), this.columnIndexTruncateLength);
 
     this.flushPageStoreToWriter = flushToWriter.bind(pageStore);
     this.writeStore = props.newColumnWriteStore(parquetSchema, pageStore);
