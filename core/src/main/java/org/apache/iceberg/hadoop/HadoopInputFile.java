@@ -21,7 +21,10 @@ package org.apache.iceberg.hadoop;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -30,6 +33,7 @@ import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 
 /**
  * {@link InputFile} implementation using the Hadoop {@link FileSystem} API.
@@ -37,6 +41,7 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
  * This class is based on Parquet's HadoopInputFile.
  */
 public class HadoopInputFile implements InputFile {
+  public static final String[] NO_LOCATION_PREFERENCE = new String[0];
 
   private final FileSystem fs;
   private final Path path;
@@ -167,6 +172,24 @@ public class HadoopInputFile implements InputFile {
 
   public FileStatus getStat() {
     return lazyStat();
+  }
+
+  public Path getPath() {
+    return path;
+  }
+
+  public String[] getBlockLocations(long start, long end) {
+    List<String> hosts = Lists.newArrayList();
+    try {
+      for (BlockLocation location : fs.getFileBlockLocations(path, start, end)) {
+        Collections.addAll(hosts, location.getHosts());
+      }
+
+      return hosts.toArray(NO_LOCATION_PREFERENCE);
+
+    } catch (IOException e) {
+      throw new RuntimeIOException(e, "Failed to get block locations for path: %s", path);
+    }
   }
 
   @Override

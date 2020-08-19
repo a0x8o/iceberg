@@ -281,6 +281,12 @@ public class TestAvroNameMapping extends TestAvroReadProjection {
     Assert.assertEquals(record, projected);
   }
 
+  @Test
+  @Override
+  public void testAvroArrayAsLogicalMap() {
+    // no-op
+  }
+
   @Override
   protected Record writeAndRead(String desc,
                                 Schema writeSchema,
@@ -315,7 +321,7 @@ public class TestAvroNameMapping extends TestAvroReadProjection {
 
     Iterable<GenericData.Record> records = Avro.read(Files.localInput(file))
         .project(readSchema)
-        .nameMapping(nameMapping)
+        .withNameMapping(nameMapping)
         .build();
 
     return Iterables.getOnlyElement(records);

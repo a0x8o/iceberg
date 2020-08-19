@@ -50,7 +50,7 @@ import org.junit.rules.TemporaryFolder;
 
 import static org.apache.iceberg.types.Types.NestedField.optional;
 
-public class TestDataSourceOptions {
+public abstract class TestDataSourceOptions {
 
   private static final Configuration CONF = new Configuration();
   private static final Schema SCHEMA = new Schema(
@@ -236,7 +236,7 @@ public class TestDataSourceOptions {
               .format("iceberg")
               .option("snapshot-id", snapshotIds.get(3).toString())
               .option("start-snapshot-id", snapshotIds.get(3).toString())
-              .load(tableLocation);
+              .load(tableLocation).explain();
         });
 
     // end-snapshot-id and as-of-timestamp are both configured.
@@ -249,7 +249,7 @@ public class TestDataSourceOptions {
               .format("iceberg")
               .option("as-of-timestamp", Long.toString(table.snapshot(snapshotIds.get(3)).timestampMillis()))
               .option("end-snapshot-id", snapshotIds.get(2).toString())
-              .load(tableLocation);
+              .load(tableLocation).explain();
         });
 
     // only end-snapshot-id is configured.
@@ -261,7 +261,7 @@ public class TestDataSourceOptions {
           spark.read()
               .format("iceberg")
               .option("end-snapshot-id", snapshotIds.get(2).toString())
-              .load(tableLocation);
+              .load(tableLocation).explain();
         });
 
     // test (1st snapshot, current snapshot] incremental scan.
@@ -363,5 +363,29 @@ public class TestDataSourceOptions {
 
     int partitionNum = metadataDf.javaRDD().getNumPartitions();
     Assert.assertEquals("Spark partitions should match", expectedSplits, partitionNum);
+  }
+
+  @Test
+  public void testExtraSnapshotMetadata() throws IOException {
+    String tableLocation = temp.newFolder("iceberg-table").toString();
+    HadoopTables tables = new HadoopTables(CONF);
+    tables.create(SCHEMA, PartitionSpec.unpartitioned(), Maps.newHashMap(), tableLocation);
+
+    List<SimpleRecord> expectedRecords = Lists.newArrayList(
+            new SimpleRecord(1, "a"),
+            new SimpleRecord(2, "b")
+    );
+    Dataset<Row> originalDf = spark.createDataFrame(expectedRecords, SimpleRecord.class);
+    originalDf.select("id", "data").write()
+            .format("iceberg")
+            .mode("append")
+            .option("snapshot-property.extra-key", "someValue")
+            .option("snapshot-property.another-key", "anotherValue")
+            .save(tableLocation);
+
+    Table table = tables.load(tableLocation);
+
+    Assert.assertTrue(table.currentSnapshot().summary().get("extra-key").equals("someValue"));
+    Assert.assertTrue(table.currentSnapshot().summary().get("another-key").equals("anotherValue"));
   }
 }

@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -35,6 +36,7 @@ import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.orc.OrcConf;
 import org.apache.orc.OrcFile;
@@ -59,7 +61,7 @@ public class ORC {
     private final OutputFile file;
     private final Configuration conf;
     private Schema schema = null;
-    private Function<TypeDescription, OrcValueWriter<?>>  createWriterFunc;
+    private BiFunction<Schema, TypeDescription, OrcRowWriter<?>> createWriterFunc;
     private Map<String, byte[]> metadata = new HashMap<>();
 
     private WriteBuilder(OutputFile file) {
@@ -81,7 +83,7 @@ public class ORC {
       return this;
     }
 
-    public WriteBuilder createWriterFunc(Function<TypeDescription, OrcValueWriter<?>> writerFunction) {
+    public WriteBuilder createWriterFunc(BiFunction<Schema, TypeDescription, OrcRowWriter<?>> writerFunction) {
       this.createWriterFunc = writerFunction;
       return this;
     }
@@ -120,13 +122,16 @@ public class ORC {
   public static class ReadBuilder {
     private final InputFile file;
     private final Configuration conf;
-    private org.apache.iceberg.Schema schema = null;
+    private Schema schema = null;
     private Long start = null;
     private Long length = null;
     private Expression filter = null;
     private boolean caseSensitive = true;
+    private NameMapping nameMapping = null;
 
     private Function<TypeDescription, OrcRowReader<?>> readerFunc;
+    private Function<TypeDescription, OrcBatchReader<?>> batchedReaderFunc;
+    private int recordsPerBatch = VectorizedRowBatch.DEFAULT_SIZE;
 
     private ReadBuilder(InputFile file) {
       Preconditions.checkNotNull(file, "Input file cannot be null");
@@ -168,6 +173,8 @@ public class ORC {
     }
 
     public ReadBuilder createReaderFunc(Function<TypeDescription, OrcRowReader<?>> readerFunction) {
+      Preconditions.checkArgument(this.batchedReaderFunc == null,
+          "Reader function cannot be set since the batched version is already set");
       this.readerFunc = readerFunction;
       return this;
     }
@@ -177,9 +184,27 @@ public class ORC {
       return this;
     }
 
+    public ReadBuilder createBatchedReaderFunc(Function<TypeDescription, OrcBatchReader<?>> batchReaderFunction) {
+      Preconditions.checkArgument(this.readerFunc == null,
+          "Batched reader function cannot be set since the non-batched version is already set");
+      this.batchedReaderFunc = batchReaderFunction;
+      return this;
+    }
+
+    public ReadBuilder recordsPerBatch(int numRecordsPerBatch) {
+      this.recordsPerBatch = numRecordsPerBatch;
+      return this;
+    }
+
+    public ReadBuilder withNameMapping(NameMapping newNameMapping) {
+      this.nameMapping = newNameMapping;
+      return this;
+    }
+
     public <D> CloseableIterable<D> build() {
       Preconditions.checkNotNull(schema, "Schema is required");
-      return new OrcIterable<>(file, conf, schema, start, length, readerFunc, caseSensitive, filter);
+      return new OrcIterable<>(file, conf, schema, nameMapping, start, length, readerFunc, caseSensitive, filter,
+          batchedReaderFunc, recordsPerBatch);
     }
   }
 

@@ -19,15 +19,14 @@
 
 package org.apache.iceberg;
 
-import java.util.Collection;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.ResidualEvaluator;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
-import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.TypeUtil;
 
 /**
@@ -77,23 +76,14 @@ public class ManifestEntriesTable extends BaseMetadataTable {
       super(ops, table, schema);
     }
 
-    private EntriesTableScan(
-        TableOperations ops, Table table, Long snapshotId, Schema schema, Expression rowFilter,
-        boolean ignoreResiduals, boolean caseSensitive, boolean colStats, Collection<String> selectedColumns,
-        ImmutableMap<String, String> options) {
-      super(
-          ops, table, snapshotId, schema, rowFilter, ignoreResiduals,
-          caseSensitive, colStats, selectedColumns, options);
+    private EntriesTableScan(TableOperations ops, Table table, Schema schema, TableScanContext context) {
+      super(ops, table, schema, context);
     }
 
     @Override
-    protected TableScan newRefinedScan(
-        TableOperations ops, Table table, Long snapshotId, Schema schema, Expression rowFilter,
-        boolean ignoreResiduals, boolean caseSensitive, boolean colStats, Collection<String> selectedColumns,
-        ImmutableMap<String, String> options) {
-      return new EntriesTableScan(
-          ops, table, snapshotId, schema, rowFilter, ignoreResiduals,
-          caseSensitive, colStats, selectedColumns, options);
+    protected TableScan newRefinedScan(TableOperations ops, Table table, Schema schema,
+                                       TableScanContext context) {
+      return new EntriesTableScan(ops, table, schema, context);
     }
 
     @Override
@@ -108,7 +98,8 @@ public class ManifestEntriesTable extends BaseMetadataTable {
         boolean ignoreResiduals, boolean caseSensitive, boolean colStats) {
       // return entries from both data and delete manifests
       CloseableIterable<ManifestFile> manifests = CloseableIterable.withNoopClose(snapshot.allManifests());
-      Schema fileSchema = new Schema(schema().findType("data_file").asStructType().fields());
+      Type fileProjection = schema().findType("data_file");
+      Schema fileSchema = fileProjection != null ? new Schema(fileProjection.asStructType().fields()) : new Schema();
       String schemaString = SchemaParser.toJson(schema());
       String specString = PartitionSpecParser.toJson(PartitionSpec.unpartitioned());
       Expression filter = ignoreResiduals ? Expressions.alwaysTrue() : rowFilter;
@@ -126,7 +117,7 @@ public class ManifestEntriesTable extends BaseMetadataTable {
 
     ManifestReadTask(FileIO io, ManifestFile manifest, Schema fileSchema, String schemaString,
                      String specString, ResidualEvaluator residuals) {
-      super(DataFiles.fromManifest(manifest), schemaString, specString, residuals);
+      super(DataFiles.fromManifest(manifest), null, schemaString, specString, residuals);
       this.fileSchema = fileSchema;
       this.io = io;
       this.manifest = manifest;

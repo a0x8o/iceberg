@@ -54,14 +54,29 @@ import org.slf4j.LoggerFactory;
 public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, SupportsNamespaces {
   private static final Logger LOG = LoggerFactory.getLogger(HiveCatalog.class);
 
+  private final String name;
   private final HiveClientPool clients;
   private final Configuration conf;
   private final StackTraceElement[] createStack;
   private boolean closed;
 
   public HiveCatalog(Configuration conf) {
+    this.name = "hive";
     this.clients = new HiveClientPool(conf);
     this.conf = conf;
+    this.createStack = Thread.currentThread().getStackTrace();
+    this.closed = false;
+  }
+
+  public HiveCatalog(String name, String uri, int clientPoolSize, Configuration conf) {
+    this.name = name;
+    this.conf = new Configuration(conf);
+    // before building the client pool, overwrite the configuration's URIs if the argument is non-null
+    if (uri != null) {
+      this.conf.set("hive.metastore.uris", uri);
+    }
+
+    this.clients = new HiveClientPool(clientPoolSize, this.conf);
     this.createStack = Thread.currentThread().getStackTrace();
     this.closed = false;
   }
@@ -92,13 +107,13 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
   @Override
   protected String name() {
-    return "hive";
+    return name;
   }
 
   @Override
   public boolean dropTable(TableIdentifier identifier, boolean purge) {
     if (!isValidIdentifier(identifier)) {
-      throw new NoSuchTableException("Invalid identifier: %s", identifier);
+      return false;
     }
 
     String database = identifier.namespace().level(0);
@@ -125,7 +140,7 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
       return true;
 
-    } catch (NoSuchObjectException e) {
+    } catch (NoSuchTableException | NoSuchObjectException e) {
       return false;
 
     } catch (TException e) {
@@ -138,10 +153,12 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
   }
 
   @Override
-  public void renameTable(TableIdentifier from, TableIdentifier to) {
+  public void renameTable(TableIdentifier from, TableIdentifier originalTo) {
     if (!isValidIdentifier(from)) {
       throw new NoSuchTableException("Invalid identifier: %s", from);
     }
+
+    TableIdentifier to = removeCatalogName(originalTo);
     Preconditions.checkArgument(isValidIdentifier(to), "Invalid identifier: %s", to);
 
     String toDatabase = to.namespace().level(0);
@@ -150,6 +167,8 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
     try {
       Table table = clients.run(client -> client.getTable(fromDatabase, fromName));
+      HiveTableOperations.validateTableIsIceberg(table, fullTableName(name, from));
+
       table.setDbName(toDatabase);
       table.setTableName(to.name());
 
@@ -210,8 +229,7 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
       return ImmutableList.of();
     }
     try {
-      return clients.run(
-          HiveMetaStoreClient::getAllDatabases)
+      return clients.run(HiveMetaStoreClient::getAllDatabases)
           .stream()
           .map(Namespace::of)
           .collect(Collectors.toList());
@@ -331,6 +349,20 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     return tableIdentifier.namespace().levels().length == 1;
   }
 
+  private TableIdentifier removeCatalogName(TableIdentifier to) {
+    if (isValidIdentifier(to)) {
+      return to;
+    }
+
+    // check if the identifier includes the catalog name and remove it
+    if (to.namespace().levels().length == 2 && name().equalsIgnoreCase(to.namespace().level(0))) {
+      return TableIdentifier.of(Namespace.of(to.namespace().level(1)), to.name());
+    }
+
+    // return the original unmodified
+    return to;
+  }
+
   private boolean isValidateNamespace(Namespace namespace) {
     return namespace.levels().length == 1;
   }
@@ -339,11 +371,33 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
   public TableOperations newTableOps(TableIdentifier tableIdentifier) {
     String dbName = tableIdentifier.namespace().level(0);
     String tableName = tableIdentifier.name();
-    return new HiveTableOperations(conf, clients, dbName, tableName);
+    return new HiveTableOperations(conf, clients, name, dbName, tableName);
   }
 
   @Override
   protected String defaultWarehouseLocation(TableIdentifier tableIdentifier) {
+    // This is a little edgy since we basically duplicate the HMS location generation logic.
+    // Sadly I do not see a good way around this if we want to keep the order of events, like:
+    // - Create meta files
+    // - Create the metadata in HMS, and this way committing the changes
+
+    // Create a new location based on the namespace / database if it is set on database level
+    try {
+      Database databaseData = clients.run(client -> client.getDatabase(tableIdentifier.namespace().levels()[0]));
+      if (databaseData.getLocationUri() != null) {
+        // If the database location is set use it as a base.
+        return String.format("%s/%s", databaseData.getLocationUri(), tableIdentifier.name());
+      }
+
+    } catch (TException e) {
+      throw new RuntimeException(String.format("Metastore operation failed for %s", tableIdentifier), e);
+
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException("Interrupted during commit", e);
+    }
+
+    // Otherwise stick to the {WAREHOUSE_DIR}/{DB_NAME}.db/{TABLE_NAME} path
     String warehouseLocation = conf.get("hive.metastore.warehouse.dir");
     Preconditions.checkNotNull(
         warehouseLocation,
@@ -361,7 +415,9 @@ public class HiveCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
     meta.putAll(database.getParameters());
     meta.put("location", database.getLocationUri());
-    meta.put("comment", database.getDescription());
+    if (database.getDescription() != null) {
+      meta.put("comment", database.getDescription());
+    }
 
     return meta;
   }

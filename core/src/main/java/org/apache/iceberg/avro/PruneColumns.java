@@ -22,6 +22,7 @@ package org.apache.iceberg.avro;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.apache.avro.JsonProperties;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaNormalization;
 import org.apache.iceberg.mapping.NameMapping;
@@ -66,6 +67,13 @@ class PruneColumns extends AvroSchemaVisitor<Schema> {
       if (!AvroSchemaUtil.hasFieldId(field)) {
         // fieldId was resolved from nameMapping, we updated hasChange
         // flag to make sure a new field is created with the field id
+        hasChange = true;
+      }
+
+      if (isOptionSchemaWithNonNullFirstOption(field.schema())) {
+        // if the field has an optional schema where the first option is not NULL,
+        // we update hasChange flag to make sure we reorder the schema and make the
+        // NULL option as the first
         hasChange = true;
       }
 
@@ -136,16 +144,18 @@ class PruneColumns extends AvroSchemaVisitor<Schema> {
       if (selectedIds.contains(keyId) || selectedIds.contains(valueId)) {
         return complexMapWithIds(array, keyId, valueId);
       } else if (element != null) {
-        Schema keyProjection = element.getField("key").schema();
+        Schema.Field keyProjectionField = element.getField("key");
         Schema valueProjection = element.getField("value").schema();
+        // it is possible that key is not selected, and
         // key schemas can be different if new field ids were assigned to them
-        if (keyValue.getField("key").schema() != keyProjection) {
+        if (keyProjectionField != null && keyValue.getField("key").schema() != keyProjectionField.schema()) {
           Preconditions.checkState(
               SchemaNormalization.parsingFingerprint64(keyValue.getField("key").schema()) ==
-                  SchemaNormalization.parsingFingerprint64(keyProjection), "Map keys should not be projected");
-          return AvroSchemaUtil.createMap(keyId, keyProjection, valueId, valueProjection);
+                  SchemaNormalization.parsingFingerprint64(keyProjectionField.schema()),
+                  "Map keys should not be projected");
+          return AvroSchemaUtil.createMap(keyId, keyProjectionField.schema(), valueId, valueProjection);
         } else if (keyValue.getField("value").schema() != valueProjection) {
-          return AvroSchemaUtil.createMap(keyId, keyProjection, valueId, valueProjection);
+          return AvroSchemaUtil.createMap(keyId, keyValue.getField("key").schema(), valueId, valueProjection);
         } else {
           return complexMapWithIds(array, keyId, valueId);
         }
@@ -247,8 +257,17 @@ class PruneColumns extends AvroSchemaVisitor<Schema> {
   }
 
   private static Schema.Field copyField(Schema.Field field, Schema newSchema, Integer fieldId) {
+    Schema newSchemaReordered;
+    // if the newSchema is an optional schema, make sure the NULL option is always the first
+    if (isOptionSchemaWithNonNullFirstOption(newSchema)) {
+      newSchemaReordered = AvroSchemaUtil.toOption(AvroSchemaUtil.fromOption(newSchema));
+    } else {
+      newSchemaReordered = newSchema;
+    }
+    // do not copy over default values as the file is expected to have values for fields already in the file schema
     Schema.Field copy = new Schema.Field(field.name(),
-        newSchema, field.doc(), field.defaultVal(), field.order());
+        newSchemaReordered, field.doc(),
+        AvroSchemaUtil.isOptionSchema(newSchemaReordered) ? JsonProperties.NULL_VALUE : null, field.order());
 
     for (Map.Entry<String, Object> prop : field.getObjectProps().entrySet()) {
       copy.addProp(prop.getKey(), prop.getValue());
@@ -264,5 +283,9 @@ class PruneColumns extends AvroSchemaVisitor<Schema> {
     }
 
     return copy;
+  }
+
+  private static boolean isOptionSchemaWithNonNullFirstOption(Schema schema) {
+    return AvroSchemaUtil.isOptionSchema(schema) && schema.getTypes().get(0).getType() != Schema.Type.NULL;
   }
 }

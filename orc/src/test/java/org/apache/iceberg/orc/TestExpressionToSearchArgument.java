@@ -33,6 +33,8 @@ import java.util.UUID;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.Binder;
 import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.mapping.MappingUtil;
+import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.types.Types;
 import org.apache.orc.TypeDescription;
 import org.apache.orc.storage.ql.io.sarg.PredicateLeaf.Type;
@@ -105,34 +107,38 @@ public class TestExpressionToSearchArgument {
 
   @Test
   public void testTimezoneSensitiveTypes() {
-    for (String timezone : new String[]{"America/New_York", "Asia/Kolkata", "UTC/Greenwich"}) {
-      TimeZone.setDefault(TimeZone.getTimeZone(timezone));
-      OffsetDateTime tsTzPredicate = OffsetDateTime.parse("2019-10-02T00:47:28.207366Z");
-      OffsetDateTime tsPredicate = OffsetDateTime.parse("1968-01-16T13:07:59.048625Z");
-      OffsetDateTime epoch = Instant.ofEpochSecond(0).atOffset(ZoneOffset.UTC);
+    TimeZone currentTz = TimeZone.getDefault();
+    try {
+      for (String timezone : new String[]{"America/New_York", "Asia/Kolkata", "UTC/Greenwich"}) {
+        TimeZone.setDefault(TimeZone.getTimeZone(timezone));
+        OffsetDateTime tsTzPredicate = OffsetDateTime.parse("2019-10-02T00:47:28.207366Z");
+        OffsetDateTime tsPredicate = OffsetDateTime.parse("1968-01-16T13:07:59.048625Z");
+        OffsetDateTime epoch = Instant.ofEpochSecond(0).atOffset(ZoneOffset.UTC);
 
-      Schema schema = new Schema(
-          required(1, "date", Types.DateType.get()),
-          required(2, "tsTz", Types.TimestampType.withZone()),
-          required(3, "ts", Types.TimestampType.withoutZone())
-      );
+        Schema schema = new Schema(
+            required(1, "date", Types.DateType.get()),
+            required(2, "tsTz", Types.TimestampType.withZone()),
+            required(3, "ts", Types.TimestampType.withoutZone())
+        );
 
-      Expression expr = and(
-          and(equal("date", 10L), equal("tsTz", ChronoUnit.MICROS.between(epoch, tsTzPredicate))),
-          equal("ts", ChronoUnit.MICROS.between(epoch, tsPredicate))
-      );
-      Expression boundFilter = Binder.bind(schema.asStruct(), expr, true);
-      SearchArgument expected = SearchArgumentFactory.newBuilder()
-          .startAnd()
-          .equals("`date`", Type.DATE, Date.valueOf(LocalDate.parse("1970-01-11", DateTimeFormatter.ISO_LOCAL_DATE)))
-          // Temporarily disable filters on Timestamp columns due to ORC-611
-          // .equals("`tsTz`", Type.TIMESTAMP, Timestamp.from(tsTzPredicate.toInstant()))
-          // .equals("`ts`", Type.TIMESTAMP, Timestamp.from(tsPredicate.toInstant()))
-          .end()
-          .build();
+        Expression expr = and(
+            and(equal("date", 10L), equal("tsTz", ChronoUnit.MICROS.between(epoch, tsTzPredicate))),
+            equal("ts", ChronoUnit.MICROS.between(epoch, tsPredicate))
+        );
+        Expression boundFilter = Binder.bind(schema.asStruct(), expr, true);
+        SearchArgument expected = SearchArgumentFactory.newBuilder()
+            .startAnd()
+            .equals("`date`", Type.DATE, Date.valueOf(LocalDate.parse("1970-01-11", DateTimeFormatter.ISO_LOCAL_DATE)))
+            // .equals("`tsTz`", Type.TIMESTAMP, Timestamp.from(tsTzPredicate.toInstant()))
+            // .equals("`ts`", Type.TIMESTAMP, Timestamp.from(tsPredicate.toInstant()))
+            .end()
+            .build();
 
-      SearchArgument actual = ExpressionToSearchArgument.convert(boundFilter, ORCSchemaUtil.convert(schema));
-      Assert.assertEquals(expected.toString(), actual.toString());
+        SearchArgument actual = ExpressionToSearchArgument.convert(boundFilter, ORCSchemaUtil.convert(schema));
+        Assert.assertEquals(expected.toString(), actual.toString());
+      }
+    } finally {
+      TimeZone.setDefault(currentTz);
     }
   }
 
@@ -256,6 +262,134 @@ public class TestExpressionToSearchArgument {
         .build();
 
     actual = ExpressionToSearchArgument.convert(boundFilter, readSchema);
+    Assert.assertEquals(expected.toString(), actual.toString());
+  }
+
+  @Test
+  public void testOriginalSchemaNameMapping() {
+    Schema originalSchema = new Schema(
+        required(1, "int", Types.IntegerType.get()),
+        optional(2, "long", Types.LongType.get())
+    );
+
+    TypeDescription orcSchemaWithoutIds = ORCSchemaUtil.removeIds(ORCSchemaUtil.convert(originalSchema));
+    NameMapping nameMapping = MappingUtil.create(originalSchema);
+
+    TypeDescription readSchema = ORCSchemaUtil.buildOrcProjection(originalSchema,
+        ORCSchemaUtil.applyNameMapping(orcSchemaWithoutIds, nameMapping));
+
+    Expression expr = and(equal("int", 1), equal("long", 1));
+    Expression boundFilter = Binder.bind(originalSchema.asStruct(), expr, true);
+    SearchArgument expected = SearchArgumentFactory.newBuilder()
+        .equals("`int`", Type.LONG, 1L)
+        .equals("`long`", Type.LONG, 1L)
+        .build();
+
+    SearchArgument actual = ExpressionToSearchArgument.convert(boundFilter, readSchema);
+    Assert.assertEquals(expected.toString(), actual.toString());
+  }
+
+  @Test
+  public void testModifiedSimpleSchemaNameMapping() {
+    Schema originalSchema = new Schema(
+        required(1, "int", Types.IntegerType.get()),
+        optional(2, "long_to_be_dropped", Types.LongType.get())
+    );
+    Schema mappingSchema = new Schema(
+        required(1, "int", Types.IntegerType.get()),
+        optional(3, "new_float_field", Types.FloatType.get())
+    );
+    TypeDescription orcSchemaWithoutIds = ORCSchemaUtil.removeIds(ORCSchemaUtil.convert(originalSchema));
+    NameMapping nameMapping = MappingUtil.create(mappingSchema);
+
+    TypeDescription readSchema = ORCSchemaUtil.buildOrcProjection(mappingSchema,
+        ORCSchemaUtil.applyNameMapping(orcSchemaWithoutIds, nameMapping));
+
+    Expression expr = equal("int", 1);
+    Expression boundFilter = Binder.bind(mappingSchema.asStruct(), expr, true);
+    SearchArgument expected = SearchArgumentFactory.newBuilder()
+        .equals("`int`", Type.LONG, 1L)
+        .build();
+
+    SearchArgument actual = ExpressionToSearchArgument.convert(boundFilter, readSchema);
+    Assert.assertEquals(expected.toString(), actual.toString());
+
+    // for columns not in the file, buildOrcProjection will append field names with _r<ID>
+    // this will be passed down to ORC, but ORC will handle such cases and return a TruthValue during evaluation
+    expr = equal("new_float_field", 1);
+    boundFilter = Binder.bind(mappingSchema.asStruct(), expr, true);
+    expected = SearchArgumentFactory.newBuilder()
+        .equals("`new_float_field_r3`", Type.FLOAT, 1.0)
+        .build();
+
+    actual = ExpressionToSearchArgument.convert(boundFilter, readSchema);
+    Assert.assertEquals(expected.toString(), actual.toString());
+  }
+
+  @Test
+  public void testModifiedComplexSchemaNameMapping() {
+    Schema originalSchema = new Schema(
+        optional(1, "struct", Types.StructType.of(
+            required(2, "long", Types.LongType.get())
+        )),
+        optional(3, "list", Types.ListType.ofRequired(4, Types.LongType.get())),
+        optional(5, "map", Types.MapType.ofRequired(6, 7, Types.LongType.get(), Types.LongType.get())),
+        optional(8, "listOfStruct", Types.ListType.ofRequired(9, Types.StructType.of(
+            required(10, "long", Types.LongType.get())))),
+        optional(11, "listOfPeople", Types.ListType.ofRequired(12, Types.StructType.of(
+            required(13, "name", Types.StringType.get()),
+            required(14, "birth_date", Types.DateType.get()))))
+    );
+    Schema mappingSchema = new Schema(
+        optional(1, "struct", Types.StructType.of(
+            required(2, "int", Types.LongType.get())
+        )),
+        optional(3, "list", Types.ListType.ofRequired(4, Types.LongType.get())),
+        optional(5, "newMap", Types.MapType.ofRequired(6, 7, Types.StringType.get(), Types.LongType.get())),
+        optional(8, "listOfStruct", Types.ListType.ofRequired(9, Types.StructType.of(
+            required(10, "newLong", Types.LongType.get())))),
+        optional(11, "listOfPeople", Types.ListType.ofRequired(12, Types.StructType.of(
+            required(13, "name", Types.StringType.get()),
+            required(14, "age", Types.IntegerType.get()))))
+    );
+    TypeDescription orcSchemaWithoutIds = ORCSchemaUtil.removeIds(ORCSchemaUtil.convert(originalSchema));
+    NameMapping nameMapping = MappingUtil.create(mappingSchema);
+
+    TypeDescription readSchema = ORCSchemaUtil.buildOrcProjection(mappingSchema,
+        ORCSchemaUtil.applyNameMapping(orcSchemaWithoutIds, nameMapping));
+
+    Expression expr = and(
+        and(
+            equal("struct.int", 1), and(
+                lessThanOrEqual("list.element", 5),
+                equal("newMap.key", "country")
+            ),
+            and(
+                equal("listOfStruct.newLong", 100L),
+                notEqual("listOfPeople.name", "Bob")
+            )
+
+        ),
+        lessThan("listOfPeople.age", 30)
+    );
+    Expression boundFilter = Binder.bind(mappingSchema.asStruct(), expr, true);
+    SearchArgument expected = SearchArgumentFactory.newBuilder()
+        .startAnd()
+        // Drops struct.long
+        .equals("`struct`.`int_r2`", Type.LONG, 1L)
+        .lessThanEquals("`list`.`_elem`", Type.LONG, 5L)
+        // Drops map
+        .equals("`newMap_r5`.`_key`", Type.STRING, "country")
+        // Drops listOfStruct.long
+        .equals("`listOfStruct`.`_elem`.`newLong_r10`", Type.LONG, 100L)
+        .startNot()
+        .equals("`listOfPeople`.`_elem`.`name`", Type.STRING, "Bob")
+        .end()
+        .lessThan("`listOfPeople`.`_elem`.`age_r14`", Type.LONG, 30L)
+        .end()
+        .build();
+
+    SearchArgument actual = ExpressionToSearchArgument.convert(boundFilter, readSchema);
     Assert.assertEquals(expected.toString(), actual.toString());
   }
 }

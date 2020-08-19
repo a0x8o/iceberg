@@ -31,10 +31,13 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.spark.SparkSchemaUtil;
+import org.apache.iceberg.spark.SparkTableUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.TableIdentifier;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
@@ -46,23 +49,27 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 @RunWith(Parameterized.class)
-public class TestIdentityPartitionData  {
+public abstract class TestIdentityPartitionData  {
   private static final Configuration CONF = new Configuration();
   private static final HadoopTables TABLES = new HadoopTables(CONF);
 
   @Parameterized.Parameters
   public static Object[][] parameters() {
     return new Object[][] {
-        new Object[] { "parquet" },
-        new Object[] { "avro" },
-        new Object[] { "orc" }
+        new Object[] { "parquet", false },
+        new Object[] { "parquet", true },
+        new Object[] { "avro", false },
+        new Object[] { "orc", false },
+        new Object[] { "orc", true },
     };
   }
 
   private final String format;
+  private final boolean vectorized;
 
-  public TestIdentityPartitionData(String format) {
+  public TestIdentityPartitionData(String format, boolean vectorized) {
     this.format = format;
+    this.vectorized = vectorized;
   }
 
   private static SparkSession spark = null;
@@ -106,22 +113,52 @@ public class TestIdentityPartitionData  {
   private Table table = null;
   private Dataset<Row> logs = null;
 
-  @Before
-  public void setupTable() throws Exception {
+  /**
+   * Use the Hive Based table to make Identity Partition Columns with no duplication of the data in the underlying
+   * parquet files. This makes sure that if the identity mapping fails, the test will also fail.
+   */
+  private void setupParquet() throws Exception {
     File location = temp.newFolder("logs");
+    File hiveLocation = temp.newFolder("hive");
+    String hiveTable = "hivetable";
     Assert.assertTrue("Temp folder should exist", location.exists());
 
     Map<String, String> properties = ImmutableMap.of(TableProperties.DEFAULT_FILE_FORMAT, format);
-    this.table = TABLES.create(LOG_SCHEMA, spec, properties, location.toString());
     this.logs = spark.createDataFrame(LOGS, LogMessage.class).select("id", "date", "level", "message");
+    spark.sql(String.format("DROP TABLE IF EXISTS %s", hiveTable));
+    logs.orderBy("date", "level", "id").write().partitionBy("date", "level").format("parquet")
+        .option("path", hiveLocation.toString()).saveAsTable(hiveTable);
 
-    logs.orderBy("date", "level", "id").write().format("iceberg").mode("append").save(location.toString());
+    this.table = TABLES.create(SparkSchemaUtil.schemaForTable(spark, hiveTable),
+        SparkSchemaUtil.specForTable(spark, hiveTable), properties, location.toString());
+
+    SparkTableUtil.importSparkTable(spark, new TableIdentifier(hiveTable), table, location.toString());
+  }
+
+  @Before
+  public void setupTable() throws Exception {
+    if (format.equals("parquet")) {
+      setupParquet();
+    } else {
+      File location = temp.newFolder("logs");
+      Assert.assertTrue("Temp folder should exist", location.exists());
+
+      Map<String, String> properties = ImmutableMap.of(TableProperties.DEFAULT_FILE_FORMAT, format);
+      this.table = TABLES.create(LOG_SCHEMA, spec, properties, location.toString());
+      this.logs = spark.createDataFrame(LOGS, LogMessage.class).select("id", "date", "level", "message");
+
+      logs.orderBy("date", "level", "id").write().format("iceberg").mode("append").save(location.toString());
+    }
   }
 
   @Test
   public void testFullProjection() {
     List<Row> expected = logs.orderBy("id").collectAsList();
-    List<Row> actual = spark.read().format("iceberg").load(table.location()).orderBy("id").collectAsList();
+    List<Row> actual = spark.read().format("iceberg")
+        .option("vectorization-enabled", String.valueOf(vectorized))
+        .load(table.location()).orderBy("id")
+        .select("id", "date", "level", "message")
+        .collectAsList();
     Assert.assertEquals("Rows should match", expected, actual);
   }
 
@@ -152,7 +189,9 @@ public class TestIdentityPartitionData  {
     for (String[] ordering : cases) {
       List<Row> expected = logs.select("id", ordering).orderBy("id").collectAsList();
       List<Row> actual = spark.read()
-          .format("iceberg").load(table.location())
+          .format("iceberg")
+          .option("vectorization-enabled", String.valueOf(vectorized))
+          .load(table.location())
           .select("id", ordering).orderBy("id")
           .collectAsList();
       Assert.assertEquals("Rows should match for ordering: " + Arrays.toString(ordering), expected, actual);

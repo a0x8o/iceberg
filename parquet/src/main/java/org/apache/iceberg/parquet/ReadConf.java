@@ -20,16 +20,17 @@
 package org.apache.iceberg.parquet;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import javax.annotation.Nullable;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.parquet.ParquetReadOptions;
@@ -49,16 +50,14 @@ class ReadConf<T> {
   private final InputFile file;
   private final ParquetReadOptions options;
   private final MessageType projection;
-  @Nullable
   private final ParquetValueReader<T> model;
-  @Nullable
   private final VectorizedReader<T> vectorizedModel;
   private final List<BlockMetaData> rowGroups;
   private final boolean[] shouldSkip;
   private final long totalValues;
   private final boolean reuseContainers;
-  @Nullable
   private final Integer batchSize;
+  private final long[] startRowPositions;
 
   // List of column chunk metadata for each row group
   private final List<Map<ColumnPath, ColumnChunkMetaData>> columnChunkMetaDataForRowGroups;
@@ -66,21 +65,31 @@ class ReadConf<T> {
   @SuppressWarnings("unchecked")
   ReadConf(InputFile file, ParquetReadOptions options, Schema expectedSchema, Expression filter,
            Function<MessageType, ParquetValueReader<?>> readerFunc, Function<MessageType,
-           VectorizedReader<?>> batchedReaderFunc, boolean reuseContainers,
+           VectorizedReader<?>> batchedReaderFunc, NameMapping nameMapping, boolean reuseContainers,
            boolean caseSensitive, Integer bSize) {
     this.file = file;
     this.options = options;
     this.reader = newReader(file, options);
     MessageType fileSchema = reader.getFileMetaData().getSchema();
 
-    boolean hasIds = ParquetSchemaUtil.hasIds(fileSchema);
-    MessageType typeWithIds = hasIds ? fileSchema : ParquetSchemaUtil.addFallbackIds(fileSchema);
+    MessageType typeWithIds;
+    if (ParquetSchemaUtil.hasIds(fileSchema)) {
+      typeWithIds = fileSchema;
+      this.projection = ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema);
+    } else if (nameMapping != null) {
+      typeWithIds = ParquetSchemaUtil.applyNameMapping(fileSchema, nameMapping);
+      this.projection = ParquetSchemaUtil.pruneColumns(typeWithIds, expectedSchema);
+    } else {
+      typeWithIds = ParquetSchemaUtil.addFallbackIds(fileSchema);
+      this.projection = ParquetSchemaUtil.pruneColumnsFallback(fileSchema, expectedSchema);
+    }
 
-    this.projection = hasIds ?
-        ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema) :
-        ParquetSchemaUtil.pruneColumnsFallback(fileSchema, expectedSchema);
     this.rowGroups = reader.getRowGroups();
     this.shouldSkip = new boolean[rowGroups.size()];
+
+    // Fetch all row groups starting positions to compute the row offsets of the filtered row groups
+    Map<Long, Long> offsetToStartPos = generateOffsetToStartPos();
+    this.startRowPositions = new long[rowGroups.size()];
 
     ParquetMetricsRowGroupFilter statsFilter = null;
     ParquetDictionaryRowGroupFilter dictFilter = null;
@@ -92,6 +101,7 @@ class ReadConf<T> {
     long computedTotalValues = 0L;
     for (int i = 0; i < shouldSkip.length; i += 1) {
       BlockMetaData rowGroup = rowGroups.get(i);
+      startRowPositions[i] = offsetToStartPos.get(rowGroup.getStartingPos());
       boolean shouldRead = filter == null || (
           statsFilter.shouldRead(typeWithIds, rowGroup) &&
               dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup)));
@@ -129,6 +139,7 @@ class ReadConf<T> {
     this.batchSize = toCopy.batchSize;
     this.vectorizedModel = toCopy.vectorizedModel;
     this.columnChunkMetaDataForRowGroups = toCopy.columnChunkMetaDataForRowGroups;
+    this.startRowPositions = toCopy.startRowPositions;
   }
 
   ParquetFileReader reader() {
@@ -152,6 +163,23 @@ class ReadConf<T> {
 
   boolean[] shouldSkip() {
     return shouldSkip;
+  }
+
+  private Map<Long, Long> generateOffsetToStartPos() {
+    ParquetFileReader fileReader = newReader(this.file, ParquetReadOptions.builder().build());
+    Map<Long, Long> offsetToStartPos = new HashMap<>();
+    long curRowCount = 0;
+    for (int i = 0; i < fileReader.getRowGroups().size(); i += 1) {
+      BlockMetaData meta = fileReader.getRowGroups().get(i);
+      offsetToStartPos.put(meta.getStartingPos(), curRowCount);
+      curRowCount += meta.getRowCount();
+    }
+
+    return offsetToStartPos;
+  }
+
+  long[] startRowPositions() {
+    return startRowPositions;
   }
 
   long totalValues() {

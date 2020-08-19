@@ -78,7 +78,7 @@ public class TestTables {
 
     TableMetadata metadata;
     if (current != null) {
-      metadata = current.buildReplacement(schema, spec, properties);
+      metadata = current.buildReplacement(schema, spec, current.location(), properties);
       return Transactions.replaceTableTransaction(name, ops, metadata);
     } else {
       metadata = newTableMetadata(schema, spec, temp.toString(), properties);
@@ -107,7 +107,7 @@ public class TestTables {
   private static final Map<String, TableMetadata> METADATA = Maps.newHashMap();
   private static final Map<String, Integer> VERSIONS = Maps.newHashMap();
 
-  static void clearTables() {
+  public static void clearTables() {
     synchronized (METADATA) {
       METADATA.clear();
       VERSIONS.clear();
