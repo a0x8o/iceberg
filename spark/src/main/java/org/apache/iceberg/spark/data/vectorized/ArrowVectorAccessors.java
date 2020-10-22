@@ -40,6 +40,7 @@ import org.apache.iceberg.arrow.vectorized.VectorHolder;
 import org.apache.parquet.Preconditions;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.Dictionary;
+import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
@@ -49,7 +50,8 @@ import org.jetbrains.annotations.NotNull;
 
 public class ArrowVectorAccessors {
 
-  private ArrowVectorAccessors() {}
+  private ArrowVectorAccessors() {
+  }
 
   static ArrowVectorAccessor getVectorAccessor(VectorHolder holder) {
     Dictionary dictionary = holder.dictionary();
@@ -349,7 +351,7 @@ public class ArrowVectorAccessors {
       this.offsetVector = vector;
       this.decodedDictionary = IntStream.rangeClosed(0, dictionary.getMaxId())
           .mapToObj(dictionary::decodeToBinary)
-          .map(binary -> binary.getBytes())
+          .map(Binary::getBytes)
           .toArray(byte[][]::new);
     }
 

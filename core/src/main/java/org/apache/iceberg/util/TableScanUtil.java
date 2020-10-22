@@ -28,7 +28,16 @@ import org.apache.iceberg.relocated.com.google.common.collect.FluentIterable;
 
 public class TableScanUtil {
 
-  private TableScanUtil() {}
+  private TableScanUtil() {
+  }
+
+  public static boolean hasDeletes(CombinedScanTask task) {
+    return task.files().stream().anyMatch(TableScanUtil::hasDeletes);
+  }
+
+  public static boolean hasDeletes(FileScanTask task) {
+    return !task.deletes().isEmpty();
+  }
 
   public static CloseableIterable<FileScanTask> splitFiles(CloseableIterable<FileScanTask> tasks, long splitSize) {
     Iterable<FileScanTask> splitTasks = FluentIterable

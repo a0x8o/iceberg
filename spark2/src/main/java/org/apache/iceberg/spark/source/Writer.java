@@ -118,7 +118,7 @@ class Writer implements DataSourceWriter {
   private FileFormat getFileFormat(Map<String, String> tableProperties, DataSourceOptions options) {
     Optional<String> formatOption = options.get("write-format");
     String formatString = formatOption
-        .orElse(tableProperties.getOrDefault(DEFAULT_FILE_FORMAT, DEFAULT_FILE_FORMAT_DEFAULT));
+        .orElseGet(() -> tableProperties.getOrDefault(DEFAULT_FILE_FORMAT, DEFAULT_FILE_FORMAT_DEFAULT));
     return FileFormat.valueOf(formatString.toUpperCase(Locale.ENGLISH));
   }
 
@@ -150,7 +150,7 @@ class Writer implements DataSourceWriter {
     }
 
     if (!extraSnapshotMetadata.isEmpty()) {
-      extraSnapshotMetadata.forEach((key, value) -> operation.set(key, value));
+      extraSnapshotMetadata.forEach(operation::set);
     }
 
     if (isWapTable() && wapId != null) {

@@ -19,28 +19,20 @@
 
 package org.apache.iceberg.data;
 
-import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.iceberg.DataFile;
-import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
-import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Files;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TestTables;
-import org.apache.iceberg.data.parquet.GenericParquetWriter;
-import org.apache.iceberg.deletes.EqualityDeleteWriter;
-import org.apache.iceberg.deletes.PositionDeleteWriter;
 import org.apache.iceberg.io.CloseableIterable;
-import org.apache.iceberg.io.FileAppender;
-import org.apache.iceberg.io.OutputFile;
-import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.Pair;
@@ -83,10 +75,10 @@ public class TestDataFileIndexStatsFilters {
     records.add(record.copy("id", 7, "data", "g", "category", "odd"));
     records.add(record.copy("id", 8, "data", null, "category", "even"));
 
-    this.dataFile = writeDataFile(records);
-    this.dataFileWithoutNulls = writeDataFile(
+    this.dataFile = FileHelpers.writeDataFile(table, Files.localOutput(temp.newFile()), records);
+    this.dataFileWithoutNulls = FileHelpers.writeDataFile(table, Files.localOutput(temp.newFile()),
         records.stream().filter(rec -> rec.getField("data") != null).collect(Collectors.toList()));
-    this.dataFileOnlyNulls = writeDataFile(
+    this.dataFileOnlyNulls = FileHelpers.writeDataFile(table, Files.localOutput(temp.newFile()),
         records.stream().filter(rec -> rec.getField("data") == null).collect(Collectors.toList()));
   }
 
@@ -105,9 +97,11 @@ public class TestDataFileIndexStatsFilters {
     deletes.add(Pair.of(dataFile.path(), 0L));
     deletes.add(Pair.of(dataFile.path(), 1L));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes);
+    Pair<DeleteFile, Set<CharSequence>> posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes);
     table.newRowDelta()
-        .addDeletes(posDeletes)
+        .addDeletes(posDeletes.first())
+        .validateDataFilesExist(posDeletes.second())
         .commit();
 
     List<FileScanTask> tasks;
@@ -130,9 +124,11 @@ public class TestDataFileIndexStatsFilters {
     deletes.add(Pair.of("some-other-file.parquet", 0L));
     deletes.add(Pair.of("some-other-file.parquet", 1L));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes);
+    Pair<DeleteFile, Set<CharSequence>> posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes);
     table.newRowDelta()
-        .addDeletes(posDeletes)
+        .addDeletes(posDeletes.first())
+        .validateDataFilesExist(posDeletes.second())
         .commit();
 
     List<FileScanTask> tasks;
@@ -156,7 +152,8 @@ public class TestDataFileIndexStatsFilters {
     Record delete = GenericRecord.create(deleteRowSchema);
     deletes.add(delete.copy("data", "d"));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes, deleteRowSchema);
+    DeleteFile posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes, deleteRowSchema);
 
     table.newRowDelta()
         .addDeletes(posDeletes)
@@ -185,7 +182,8 @@ public class TestDataFileIndexStatsFilters {
     deletes.add(delete.copy("data", "y"));
     deletes.add(delete.copy("data", "z"));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes, deleteRowSchema);
+    DeleteFile posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes, deleteRowSchema);
 
     table.newRowDelta()
         .addDeletes(posDeletes)
@@ -212,7 +210,8 @@ public class TestDataFileIndexStatsFilters {
     Record delete = GenericRecord.create(deleteRowSchema);
     deletes.add(delete.copy("data", null));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes, deleteRowSchema);
+    DeleteFile posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes, deleteRowSchema);
 
     table.newRowDelta()
         .addDeletes(posDeletes)
@@ -239,7 +238,8 @@ public class TestDataFileIndexStatsFilters {
     Record delete = GenericRecord.create(deleteRowSchema);
     deletes.add(delete.copy("data", null));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes, deleteRowSchema);
+    DeleteFile posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes, deleteRowSchema);
 
     table.newRowDelta()
         .addDeletes(posDeletes)
@@ -266,7 +266,8 @@ public class TestDataFileIndexStatsFilters {
     Record delete = GenericRecord.create(deleteRowSchema);
     deletes.add(delete.copy("data", "d"));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes, deleteRowSchema);
+    DeleteFile posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes, deleteRowSchema);
 
     table.newRowDelta()
         .addDeletes(posDeletes)
@@ -295,7 +296,8 @@ public class TestDataFileIndexStatsFilters {
     deletes.add(delete.copy("data", null));
     deletes.add(delete.copy("data", "x"));
 
-    DeleteFile posDeletes = writeDeleteFile(deletes, deleteRowSchema);
+    DeleteFile posDeletes = FileHelpers.writeDeleteFile(
+        table, Files.localOutput(temp.newFile()), deletes, deleteRowSchema);
 
     table.newRowDelta()
         .addDeletes(posDeletes)
@@ -309,59 +311,5 @@ public class TestDataFileIndexStatsFilters {
     Assert.assertEquals("Should produce one task", 1, tasks.size());
     FileScanTask task = tasks.get(0);
     Assert.assertEquals("Should have one delete file, data and deletes have null values", 1, task.deletes().size());
-  }
-
-  public DeleteFile writeDeleteFile(List<Pair<CharSequence, Long>> deletes) throws IOException {
-    OutputFile out = Files.localOutput(temp.newFile());
-    PositionDeleteWriter<?> writer = Parquet.writeDeletes(out)
-        .forTable(table)
-        .overwrite()
-        .buildPositionWriter();
-
-    try (Closeable toClose = writer) {
-      for (Pair<CharSequence, Long> delete : deletes) {
-        writer.delete(delete.first(), delete.second());
-      }
-    }
-
-    return writer.toDeleteFile();
-  }
-
-  public DeleteFile writeDeleteFile(List<Record> deletes, Schema deleteRowSchema) throws IOException {
-    OutputFile out = Files.localOutput(temp.newFile());
-    EqualityDeleteWriter<Record> writer = Parquet.writeDeletes(out)
-        .forTable(table)
-        .rowSchema(deleteRowSchema)
-        .createWriterFunc(GenericParquetWriter::buildWriter)
-        .overwrite()
-        .equalityFieldIds(deleteRowSchema.columns().stream().mapToInt(Types.NestedField::fieldId).toArray())
-        .buildEqualityWriter();
-
-    try (Closeable toClose = writer) {
-      writer.deleteAll(deletes);
-    }
-
-    return writer.toDeleteFile();
-  }
-
-  public DataFile writeDataFile(List<Record> rows) throws IOException {
-    OutputFile out = Files.localOutput(temp.newFile());
-    FileAppender<Record> writer = Parquet.write(out)
-        .createWriterFunc(GenericParquetWriter::buildWriter)
-        .schema(table.schema())
-        .overwrite()
-        .build();
-
-    try (Closeable toClose = writer) {
-      writer.addAll(rows);
-    }
-
-    return DataFiles.builder(table.spec())
-        .withFormat(FileFormat.PARQUET)
-        .withPath(out.location())
-        .withFileSizeInBytes(writer.length())
-        .withSplitOffsets(writer.splitOffsets())
-        .withMetrics(writer.metrics())
-        .build();
   }
 }

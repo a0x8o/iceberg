@@ -38,6 +38,7 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.exceptions.RuntimeIOException;
+import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.hadoop.HadoopFileIO;
@@ -50,6 +51,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.spark.SparkFilters;
 import org.apache.iceberg.spark.SparkSchemaUtil;
 import org.apache.iceberg.util.PropertyUtil;
+import org.apache.iceberg.util.TableScanUtil;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -131,7 +133,7 @@ class Reader implements DataSourceReader, SupportsScanColumnarBatch, SupportsPus
     this.splitOpenFileCost = options.get("file-open-cost").map(Long::parseLong).orElse(null);
 
     if (io.getValue() instanceof HadoopFileIO) {
-      String scheme = "no_exist";
+      String fsscheme = "no_exist";
       try {
         Configuration conf = SparkSession.active().sessionState().newHadoopConf();
         // merge hadoop config set on table
@@ -139,12 +141,13 @@ class Reader implements DataSourceReader, SupportsScanColumnarBatch, SupportsPus
         // merge hadoop config passed as options and overwrite the one on table
         mergeIcebergHadoopConfs(conf, options.asMap());
         FileSystem fs = new Path(table.location()).getFileSystem(conf);
-        scheme = fs.getScheme().toLowerCase(Locale.ENGLISH);
+        fsscheme = fs.getScheme().toLowerCase(Locale.ENGLISH);
       } catch (IOException ioe) {
         LOG.warn("Failed to get Hadoop Filesystem", ioe);
       }
+      String scheme = fsscheme; // Makes an effectively final version of scheme
       this.localityPreferred = options.get("locality").map(Boolean::parseBoolean)
-          .orElse(LOCALITY_WHITELIST_FS.contains(scheme));
+          .orElseGet(() -> LOCALITY_WHITELIST_FS.contains(scheme));
     } else {
       this.localityPreferred = false;
     }
@@ -154,10 +157,10 @@ class Reader implements DataSourceReader, SupportsScanColumnarBatch, SupportsPus
     this.encryptionManager = encryptionManager;
     this.caseSensitive = caseSensitive;
 
-    this.batchReadsEnabled = options.get("vectorization-enabled").map(Boolean::parseBoolean).orElse(
+    this.batchReadsEnabled = options.get("vectorization-enabled").map(Boolean::parseBoolean).orElseGet(() ->
         PropertyUtil.propertyAsBoolean(table.properties(),
             TableProperties.PARQUET_VECTORIZATION_ENABLED, TableProperties.PARQUET_VECTORIZATION_ENABLED_DEFAULT));
-    this.batchSize = options.get("batch-size").map(Integer::parseInt).orElse(
+    this.batchSize = options.get("batch-size").map(Integer::parseInt).orElseGet(() ->
         PropertyUtil.propertyAsInt(table.properties(),
           TableProperties.PARQUET_BATCH_SIZE, TableProperties.PARQUET_BATCH_SIZE_DEFAULT));
   }
@@ -203,6 +206,9 @@ class Reader implements DataSourceReader, SupportsScanColumnarBatch, SupportsPus
     String tableSchemaString = SchemaParser.toJson(table.schema());
     String expectedSchemaString = SchemaParser.toJson(lazySchema());
     String nameMappingString = table.properties().get(DEFAULT_NAME_MAPPING);
+
+    ValidationException.check(tasks().stream().noneMatch(TableScanUtil::hasDeletes),
+        "Cannot scan table %s: cannot apply required delete files", table);
 
     List<InputPartition<ColumnarBatch>> readTasks = Lists.newArrayList();
     for (CombinedScanTask task : tasks()) {
@@ -277,7 +283,13 @@ class Reader implements DataSourceReader, SupportsScanColumnarBatch, SupportsPus
 
   @Override
   public Statistics estimateStatistics() {
-    if (filterExpressions == null || filterExpressions == Expressions.alwaysTrue()) {
+    // its a fresh table, no data
+    if (table.currentSnapshot() == null) {
+      return new Stats(0L, 0L);
+    }
+
+    // estimate stats using snapshot summary only for partitioned tables (metadata tables are unpartitioned)
+    if (!table.spec().isUnpartitioned() && filterExpression() == Expressions.alwaysTrue()) {
       long totalRecords = PropertyUtil.propertyAsLong(table.currentSnapshot().summary(),
           SnapshotSummary.TOTAL_RECORDS_PROP, Long.MAX_VALUE);
       return new Stats(SparkSchemaUtil.estimateSize(lazyType(), totalRecords), totalRecords);
@@ -317,7 +329,9 @@ class Reader implements DataSourceReader, SupportsScanColumnarBatch, SupportsPus
 
       boolean onlyPrimitives = lazySchema().columns().stream().allMatch(c -> c.type().isPrimitiveType());
 
-      this.readUsingBatch = batchReadsEnabled && (allOrcFileScanTasks ||
+      boolean hasNoDeleteFiles = tasks().stream().noneMatch(TableScanUtil::hasDeletes);
+
+      this.readUsingBatch = batchReadsEnabled && hasNoDeleteFiles && (allOrcFileScanTasks ||
           (allParquetFileScanTasks && atLeastOneColumn && onlyPrimitives));
     }
     return readUsingBatch;

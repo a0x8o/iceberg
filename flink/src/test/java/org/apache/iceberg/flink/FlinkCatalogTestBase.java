@@ -31,6 +31,7 @@ import org.apache.flink.table.api.TableResult;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.ArrayUtils;
 import org.apache.flink.util.CloseableIterator;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
@@ -63,17 +64,19 @@ public abstract class FlinkCatalogTestBase extends FlinkTestBase {
     }
   }
 
-  @Parameterized.Parameters
-  public static Object[][] parameters() {
-    return new Object[][] {
-        new Object[] { "testhive", new String[0] },
-        new Object[] { "testhadoop", new String[0] },
-        new Object[] { "testhadoop_basenamespace", new String[] { "l0", "l1" }},
-    };
+  @Parameterized.Parameters(name = "catalogName = {0} baseNamespace = {1}")
+  // baseNamespace comes out as a String[] memory reference due to lack
+  // of a meaningful toString method. We should convert baseNamespace to
+  // use Namespace instead: https://github.com/apache/iceberg/issues/1541
+  public static Iterable<Object[]> parameters() {
+    return Lists.newArrayList(
+        new Object[] {"testhive", new String[0]},
+        new Object[] {"testhadoop", new String[0]},
+        new Object[] {"testhadoop_basenamespace", new String[] {"l0", "l1"}}
+    );
   }
 
-  protected final TableEnvironment tEnv =
-      TableEnvironment.create(EnvironmentSettings.newInstance().useBlinkPlanner().inBatchMode().build());
+  private volatile TableEnvironment tEnv = null;
 
   protected final String catalogName;
   protected final String[] baseNamespace;
@@ -103,13 +106,12 @@ public abstract class FlinkCatalogTestBase extends FlinkTestBase {
 
     FlinkCatalogFactory factory = new FlinkCatalogFactory() {
       @Override
-      protected Catalog buildIcebergCatalog(String name, Map<String, String> options) {
-        // Flink hadoop configuration depends on system env, it is quiet hard to set from testing. So directly pass
-        // correct hadoop configuration.
-        return super.buildIcebergCatalog(name, options, hiveConf);
+      protected org.apache.flink.table.catalog.Catalog createCatalog(
+          String name, Map<String, String> properties, Configuration hadoopConf) {
+        return super.createCatalog(name, properties, hiveConf);
       }
     };
-    tEnv.registerCatalog(
+    getTableEnv().registerCatalog(
         catalogName,
         flinkCatalogs.computeIfAbsent(catalogName, k -> factory.createCatalog(k, config)));
 
@@ -117,8 +119,22 @@ public abstract class FlinkCatalogTestBase extends FlinkTestBase {
     this.icebergNamespace = Namespace.of(ArrayUtils.concat(baseNamespace, new String[] { DATABASE }));
   }
 
+  protected TableEnvironment getTableEnv() {
+    if (tEnv == null) {
+      synchronized (this) {
+        if (tEnv == null) {
+          this.tEnv = TableEnvironment.create(EnvironmentSettings
+              .newInstance()
+              .useBlinkPlanner()
+              .inBatchMode().build());
+        }
+      }
+    }
+    return tEnv;
+  }
+
   public List<Object[]> sql(String query, Object... args) {
-    TableResult tableResult = tEnv.executeSql(String.format(query, args));
+    TableResult tableResult = getTableEnv().executeSql(String.format(query, args));
     tableResult.getJobClient().ifPresent(c -> {
       try {
         c.getJobExecutionResult(Thread.currentThread().getContextClassLoader()).get();

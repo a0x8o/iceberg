@@ -34,7 +34,8 @@ import org.apache.iceberg.relocated.com.google.common.base.Throwables;
  */
 public class DynMethods {
 
-  private DynMethods() {}
+  private DynMethods() {
+  }
 
   /**
    * Convenience wrapper class around {@link java.lang.reflect.Method}.
@@ -101,14 +102,14 @@ public class DynMethods {
     }
 
     /**
-     * @return whether the method is a static method
+     * Returns whether the method is a static method.
      */
     public boolean isStatic() {
       return Modifier.isStatic(method.getModifiers());
     }
 
     /**
-     * @return whether the method is a noop
+     * Returns whether the method is a noop.
      */
     public boolean isNoop() {
       return this == NOOP;

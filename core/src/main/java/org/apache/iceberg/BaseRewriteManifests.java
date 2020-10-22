@@ -110,6 +110,7 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
     summaryBuilder.set(KEPT_MANIFESTS_COUNT, String.valueOf(keptManifests.size()));
     summaryBuilder.set(REPLACED_MANIFESTS_COUNT, String.valueOf(rewrittenManifests.size() + deletedManifests.size()));
     summaryBuilder.set(PROCESSED_ENTRY_COUNT, String.valueOf(entryCount.get()));
+    summaryBuilder.setPartitionSummaryLimit(0); // do not include partition summaries because data did not change
     return summaryBuilder.build();
   }
 
@@ -207,8 +208,8 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
     // keep any existing manifests as-is that were not processed
     keptManifests.clear();
     currentManifests.stream()
-      .filter(manifest -> !rewrittenManifests.contains(manifest) && !deletedManifests.contains(manifest))
-      .forEach(manifest -> keptManifests.add(manifest));
+        .filter(manifest -> !rewrittenManifests.contains(manifest) && !deletedManifests.contains(manifest))
+        .forEach(keptManifests::add);
   }
 
   private void reset() {
@@ -247,7 +248,7 @@ public class BaseRewriteManifests extends SnapshotProducer<RewriteManifests> imp
             }
           });
     } finally {
-      Tasks.foreach(writers.values()).executeWith(ThreadPools.getWorkerPool()).run(writer -> writer.close());
+      Tasks.foreach(writers.values()).executeWith(ThreadPools.getWorkerPool()).run(WriterWrapper::close);
     }
   }
 

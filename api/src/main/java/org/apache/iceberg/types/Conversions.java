@@ -32,10 +32,12 @@ import java.util.Arrays;
 import java.util.UUID;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.expressions.Literal;
+import org.apache.iceberg.util.UUIDUtil;
 
 public class Conversions {
 
-  private Conversions() {}
+  private Conversions() {
+  }
 
   private static final String HIVE_NULL = "__HIVE_DEFAULT_PARTITION__";
 
@@ -108,13 +110,10 @@ public class Conversions {
         try {
           return ENCODER.get().encode(buffer);
         } catch (CharacterCodingException e) {
-          throw new RuntimeIOException(e, "Failed to encode value as UTF-8: " + value);
+          throw new RuntimeIOException(e, "Failed to encode value as UTF-8: %s", value);
         }
       case UUID:
-        UUID uuid = (UUID) value;
-        return ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN)
-            .putLong(0, uuid.getMostSignificantBits())
-            .putLong(8, uuid.getLeastSignificantBits());
+        return UUIDUtil.convertToByteBuffer((UUID) value);
       case FIXED:
       case BINARY:
         return (ByteBuffer) value;
@@ -167,12 +166,10 @@ public class Conversions {
         try {
           return DECODER.get().decode(tmp);
         } catch (CharacterCodingException e) {
-          throw new RuntimeIOException(e, "Failed to decode value as UTF-8: " + buffer);
+          throw new RuntimeIOException(e, "Failed to decode value as UTF-8: %s", buffer);
         }
       case UUID:
-        long mostSigBits = tmp.getLong();
-        long leastSigBits = tmp.getLong();
-        return new UUID(mostSigBits, leastSigBits);
+        return UUIDUtil.convert(tmp);
       case FIXED:
       case BINARY:
         return tmp;

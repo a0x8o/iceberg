@@ -28,6 +28,7 @@ import java.util.function.BiFunction;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.Metrics;
+import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.hadoop.HadoopOutputFile;
@@ -53,14 +54,16 @@ class OrcFileAppender<D> implements FileAppender<D> {
   private final OrcRowWriter<D> valueWriter;
   private boolean isClosed = false;
   private final Configuration conf;
+  private final MetricsConfig metricsConfig;
 
   OrcFileAppender(Schema schema, OutputFile file,
                   BiFunction<Schema, TypeDescription, OrcRowWriter<?>> createWriterFunc,
                   Configuration conf, Map<String, byte[]> metadata,
-                  int batchSize) {
+                  int batchSize, MetricsConfig metricsConfig) {
     this.conf = conf;
     this.file = file;
     this.batchSize = batchSize;
+    this.metricsConfig = metricsConfig;
 
     TypeDescription orcSchema = ORCSchemaUtil.convert(schema);
     this.batch = orcSchema.createRowBatch(this.batchSize);
@@ -83,7 +86,7 @@ class OrcFileAppender<D> implements FileAppender<D> {
         batch.reset();
       }
     } catch (IOException ioe) {
-      throw new RuntimeIOException(ioe, "Problem writing to ORC file " + file.location());
+      throw new RuntimeIOException(ioe, "Problem writing to ORC file %s", file.location());
     }
   }
 
@@ -91,7 +94,7 @@ class OrcFileAppender<D> implements FileAppender<D> {
   public Metrics metrics() {
     Preconditions.checkState(isClosed,
         "Cannot return metrics while appending to an open file.");
-    return OrcMetrics.fromWriter(writer);
+    return OrcMetrics.fromWriter(writer, metricsConfig);
   }
 
   @Override
@@ -135,7 +138,7 @@ class OrcFileAppender<D> implements FileAppender<D> {
     try {
       writer = OrcFile.createWriter(locPath, options);
     } catch (IOException ioe) {
-      throw new RuntimeIOException(ioe, "Can't create file " + locPath);
+      throw new RuntimeIOException(ioe, "Can't create file %s", locPath);
     }
 
     metadata.forEach((key, value) -> writer.addUserMetadata(key, ByteBuffer.wrap(value)));
