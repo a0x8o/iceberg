@@ -21,7 +21,7 @@
 Iceberg supports the reading of Iceberg tables from [Hive](https://hive.apache.org) by using a [StorageHandler](https://cwiki.apache.org/confluence/display/Hive/StorageHandlers). Please note that only Hive 2.x versions are currently supported.
 
 ### Table creation
-This section explains the various steps needed in order to overlay a Hive table "on top of" an existing Iceberg table. Iceberg tables are created using either a [`Catalog`](/javadoc/master/index.html?org/apache/iceberg/catalog/Catalog.html) or an implementation of the [`Tables`](/javadoc/master/index.html?org/apache/iceberg/Tables.html) interface and Hive needs to be configured accordingly to read data from these different types of table.
+This section explains the various steps needed in order to overlay a Hive table "on top of" an existing Iceberg table. Iceberg tables are created using either a [`Catalog`](./javadoc/master/index.html?org/apache/iceberg/catalog/Catalog.html) or an implementation of the [`Tables`](./javadoc/master/index.html?org/apache/iceberg/Tables.html) interface and Hive needs to be configured accordingly to read data from these different types of table.
 
 #### Add the Iceberg Hive Runtime jar file to the Hive classpath
 Regardless of the table type, the `HiveIcebergStorageHandler` and supporting classes need to be made available on Hive's classpath. These are provided by the `iceberg-hive-runtime` jar file. For example, if using the Hive shell, this can be achieved by issuing a statement like so:
@@ -48,6 +48,40 @@ LOCATION 'hdfs://some_bucket/some_path/table_a';
 You should now be able to issue Hive SQL `SELECT` queries using the above table and see the results returned from the underlying Iceberg table. Both the Map Reduce and Tez query execution engines are supported.
 ```sql
 SELECT * from table_a;
+```
+
+#### Using Hive Catalog
+Iceberg tables created using `HiveCatalog` are automatically registered with Hive.
+
+##### Create an Iceberg table
+The first step is to create an Iceberg table using the Spark/Java/Python API and `HiveCatalog`. For the purposes of this documentation we will assume that the table is called `table_b` and that the table location is `s3://some_path/table_b`. In order for Iceberg to correctly set up the Hive table for querying some configuration values need to be set, the two options for this are described below - you can use either or the other depending on your use case.
+
+##### Hive Configuration
+The value `iceberg.engine.hive.enabled` needs to be set to `true` and added to the Hive configuration file on the classpath of the application creating the table. This can be done by modifying the relevant `hive-site.xml`. Alternatively this can be done programmatically like so:
+```java
+Configuration hadoopConfiguration = spark.sparkContext().hadoopConfiguration();
+hadoopConfiguration.set(ConfigProperties.ENGINE_HIVE_ENABLED, "true"); //iceberg.engine.hive.enabled=true
+HiveCatalog catalog = new HiveCatalog(hadoopConfiguration);
+...
+catalog.createTable(tableId, schema, spec);
+```
+
+##### Table Property Configuration
+The property `engine.hive.enabled` needs to be set to `true` and added to the table properties when creating the Iceberg table. This can be done like so:
+```java
+    Map<String, String> tableProperties = new HashMap<String, String>();
+    tableProperties.put(TableProperties.ENGINE_HIVE_ENABLED, "true"); //engine.hive.enabled=true
+    catalog.createTable(tableId, schema, spec, tableProperties);
+```
+
+#### Query the Iceberg table via Hive
+In order to query a Hive table created by either of the HiveCatalog methods described above you need to first set a Hive configuration value like so:
+```sql
+SET iceberg.mr.catalog=hive;
+```
+You should now be able to issue Hive SQL `SELECT` queries using the above table and see the results returned from the underlying Iceberg table. Both the Map Reduce and Tez query execution engines are supported.
+```sql
+SELECT * from table_b;
 ```
 
 ### Features

@@ -29,6 +29,7 @@ buildscript {
   dependencies {
     classpath 'com.github.jengelman.gradle.plugins:shadow:5.0.0'
     classpath 'com.palantir.baseline:gradle-baseline-java:3.36.2'
+    classpath 'com.palantir.gradle.gitversion:gradle-git-version:0.12.3'
     classpath 'com.diffplug.spotless:spotless-plugin-gradle:3.14.0'
     classpath 'gradle.plugin.org.inferred:gradle-processors:2.1.0'
     classpath 'me.champeau.gradle:jmh-gradle-plugin:0.4.8'
@@ -36,8 +37,15 @@ buildscript {
 }
 
 plugins {
-  id 'com.palantir.git-version' version '0.12.3'
   id 'nebula.dependency-recommender' version '9.0.2'
+  id 'org.projectnessie' version '0.2.1'
+}
+
+try {
+  // apply this plugin in a try-catch block so that we can handle cases without .git directory
+  apply plugin: 'com.palantir.git-version'
+} catch (Exception e) {
+  project.logger.error(e.getMessage())
 }
 
 if (JavaVersion.current() == JavaVersion.VERSION_1_8) {
@@ -123,6 +131,23 @@ subprojects {
   }
 
   test {
+    def logDir = "${rootDir}/build/testlogs"
+    def logFile = "${logDir}/${project.name}.log"
+    mkdir("${logDir}")
+    delete("${logFile}")
+    def buildLog = new File(logFile)
+    addTestOutputListener(new TestOutputListener() {
+      def lastDescriptor
+      @Override
+      void onOutput(TestDescriptor testDescriptor, TestOutputEvent testOutputEvent) {
+        if (lastDescriptor != testDescriptor) {
+          buildLog << "--------\n- Test log for: "<< testDescriptor << "\n--------\n"
+          lastDescriptor = testDescriptor
+        }
+        buildLog << testOutputEvent.destination << " " << testOutputEvent.message
+      }
+    })
+
     testLogging {
       if ("true".equalsIgnoreCase(System.getenv('CI'))) {
         events "failed", "passed"
@@ -234,6 +259,50 @@ project(':iceberg-data') {
   test {
     // Only for TestSplitScan as of Gradle 5.0+
     maxHeapSize '1500m'
+  }
+}
+
+project(':iceberg-aws') {
+  dependencies {
+    compile project(':iceberg-api')
+    compile project(':iceberg-core')
+
+    compile 'software.amazon.awssdk:url-connection-client'
+    compile 'software.amazon.awssdk:s3'
+    compile 'software.amazon.awssdk:kms'
+    compile 'software.amazon.awssdk:glue'
+
+    compileOnly("org.apache.hadoop:hadoop-common") {
+      exclude group: 'org.apache.avro', module: 'avro'
+      exclude group: 'org.slf4j', module: 'slf4j-log4j12'
+      exclude group: 'javax.servlet', module: 'servlet-api'
+      exclude group: 'com.google.code.gson', module: 'gson'
+    }
+
+    testCompile project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testCompile("com.adobe.testing:s3mock-junit4") {
+      exclude module: "spring-boot-starter-logging"
+      exclude module: "logback-classic"
+    }
+  }
+
+  sourceSets {
+    integration {
+      java.srcDir "$projectDir/src/integration/java"
+      resources.srcDir "$projectDir/src/integration/resources"
+      compileClasspath += main.output + test.output
+      runtimeClasspath += main.output + test.output
+    }
+  }
+
+  configurations {
+    integrationImplementation.extendsFrom testImplementation
+    integrationRuntime.extendsFrom testRuntime
+  }
+
+  task integrationTest(type: Test) {
+    testClassesDirs = sourceSets.integration.output.classesDirs
+    classpath = sourceSets.integration.runtimeClasspath
   }
 }
 
@@ -463,12 +532,11 @@ project(':iceberg-mr') {
     testCompile("org.apache.calcite:calcite-core")
     testCompile("com.esotericsoftware:kryo-shaded:4.0.2")
     testCompile("com.fasterxml.jackson.core:jackson-annotations:2.6.5")
-    testCompile("com.klarna:hiverunner:5.2.1") {
-      exclude group: 'javax.jms', module: 'jms'
+    testCompile("org.apache.hive:hive-service") {
       exclude group: 'org.apache.hive', module: 'hive-exec'
-      exclude group: 'org.codehaus.jettison', module: 'jettison'
-      exclude group: 'org.apache.calcite.avatica'
     }
+    testCompile("org.apache.tez:tez-dag")
+    testCompile("org.apache.tez:tez-mapreduce")
   }
 
   test {
@@ -530,12 +598,11 @@ if (jdkVersion == '8') {
       testCompile("org.apache.calcite:calcite-core")
       testCompile("com.esotericsoftware:kryo-shaded:4.0.2")
       testCompile("com.fasterxml.jackson.core:jackson-annotations:2.6.5")
-      testCompile("com.klarna:hiverunner:6.0.1") {
-        exclude group: 'javax.jms', module: 'jms'
+      testCompile("org.apache.hive:hive-service:3.1.2") {
         exclude group: 'org.apache.hive', module: 'hive-exec'
-        exclude group: 'org.codehaus.jettison', module: 'jettison'
-        exclude group: 'org.apache.calcite.avatica'
       }
+      testCompile("org.apache.tez:tez-dag:0.9.1")
+      testCompile("org.apache.tez:tez-mapreduce:0.9.1")
     }
 
     test {
@@ -879,6 +946,49 @@ project(':iceberg-spark3') {
   }
 }
 
+project(":iceberg-spark3-extensions") {
+  apply plugin: 'java'
+  apply plugin: 'scala'
+  apply plugin: 'antlr'
+
+  configurations {
+    /*
+     The Gradle Antlr plugin erroneously adds both antlr-build and runtime dependencies to the runtime path. This
+     bug https://github.com/gradle/gradle/issues/820 exists because older versions of Antlr do not have separate
+     runtime and compile dependencies and they do not want to break backwards compatibility. So to only end up with
+     the runtime dependency on the runtime classpath we remove the dependencies added by the plugin here. Then add
+     the runtime dependency back to only the runtime configuration manually.
+    */
+    compile {
+      extendsFrom = extendsFrom.findAll { it != configurations.antlr }
+    }
+  }
+
+  dependencies {
+    compileOnly project(':iceberg-spark3')
+
+    compileOnly "org.scala-lang:scala-library"
+    compileOnly("org.apache.spark:spark-hive_2.12") {
+      exclude group: 'org.apache.avro', module: 'avro'
+      exclude group: 'org.apache.arrow'
+    }
+
+    testCompile project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testCompile project(path: ':iceberg-hive-metastore', configuration: 'testArtifacts')
+    testCompile project(path: ':iceberg-spark', configuration: 'testArtifacts')
+    testCompile project(path: ':iceberg-spark3', configuration: 'testArtifacts')
+
+    // Required because we remove antlr plugin dependencies from the compile configuration, see note above
+    runtime "org.antlr:antlr4-runtime:4.7.1"
+    antlr "org.antlr:antlr4:4.7.1"
+  }
+
+  generateGrammarSource {
+    maxHeapSize = "64m"
+    arguments += ['-visitor', '-package', 'org.apache.spark.sql.catalyst.parser.extensions']
+  }
+}
+
 project(':iceberg-spark3-runtime') {
   apply plugin: 'com.github.johnrengelman.shadow'
 
@@ -965,6 +1075,53 @@ project(':iceberg-pig') {
       exclude group: 'org.apache.avro', module: 'avro'
     }
   }
+}
+
+project(':iceberg-nessie') {
+  apply plugin: 'org.projectnessie'
+
+  java {
+    registerFeature('clientSupport') {
+      usingSourceSet(sourceSets.main)
+    }
+  }
+
+  dependencies {
+    compile project(':iceberg-core')
+    compile project(path: ':iceberg-bundled-guava', configuration: 'shadow')
+    compile "org.projectnessie:nessie-client"
+    quarkusAppRunnerConfig "org.projectnessie:nessie-quarkus:0.2.1"
+    clientSupportImplementation("io.quarkus:quarkus-rest-client") {
+      exclude group: "org.jboss.logging", module: "commons-logging-jboss-logging"
+    }
+    clientSupportImplementation("io.quarkus:quarkus-resteasy-jackson") {
+      exclude group: "org.codehaus.mojo", module: "animal-sniffer-annotations"
+    }
+
+
+    compileOnly("org.apache.hadoop:hadoop-common") {
+      exclude group: 'org.apache.avro', module: 'avro'
+      exclude group: 'org.apache.httpcomponents', module: 'httpclient'
+      exclude group: 'org.apache.httpcomponents', module: 'httpcore'
+      exclude group: 'commons-httpclient', module: 'commons-httpclient'
+      exclude group: "com.sun.jersey", module: 'jersey-core'
+      exclude group: "com.sun.jersey", module: 'jersey-json'
+      exclude group: "com.sun.jersey", module: 'jersey-server'
+    }
+
+    testCompile project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testCompile(project(":iceberg-nessie")) {
+      capabilities {
+        requireCapability("org.apache.iceberg:iceberg-nessie-client-support")
+      }
+    }
+  }
+  quarkusAppRunnerProperties {
+    props = ["quarkus.http.test-port": 0]
+  }
+  tasks.getByName("quarkus-start").dependsOn("compileTestJava")
+  tasks.test.dependsOn("quarkus-start").finalizedBy("quarkus-stop")
+
 }
 
 @Memoized

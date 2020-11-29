@@ -333,6 +333,11 @@ public class TestHelpers {
     }
 
     @Override
+    public Long pos() {
+      return null;
+    }
+
+    @Override
     public int specId() {
       return 0;
     }
@@ -375,6 +380,11 @@ public class TestHelpers {
     @Override
     public Map<Integer, Long> nullValueCounts() {
       return nullValueCounts;
+    }
+
+    @Override
+    public Map<Integer, Long> nanValueCounts() {
+      return null; // will be updated in a separate pr soon
     }
 
     @Override
