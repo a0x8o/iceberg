@@ -24,13 +24,13 @@ import java.util.function.Function;
 import org.apache.iceberg.aws.AwsProperties;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ObjectCannedACL;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Request;
 import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
+@SuppressWarnings("UnnecessaryLambda")
 public class S3RequestUtil {
 
   private static final Function<ServerSideEncryption, S3Request.Builder> NULL_SSE_SETTER = sse -> null;
@@ -55,11 +55,6 @@ public class S3RequestUtil {
   }
 
   static void configureEncryption(AwsProperties awsProperties, GetObjectRequest.Builder requestBuilder) {
-    configureEncryption(awsProperties, NULL_SSE_SETTER, NULL_STRING_SETTER,
-        requestBuilder::sseCustomerAlgorithm, requestBuilder::sseCustomerKey, requestBuilder::sseCustomerKeyMD5);
-  }
-
-  static void configureEncryption(AwsProperties awsProperties, HeadObjectRequest.Builder requestBuilder) {
     configureEncryption(awsProperties, NULL_SSE_SETTER, NULL_STRING_SETTER,
         requestBuilder::sseCustomerAlgorithm, requestBuilder::sseCustomerKey, requestBuilder::sseCustomerKeyMD5);
   }

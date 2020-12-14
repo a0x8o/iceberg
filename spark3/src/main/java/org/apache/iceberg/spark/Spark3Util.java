@@ -382,6 +382,11 @@ public class Spark3Util {
   }
 
   public static boolean isVectorizationEnabled(Map<String, String> properties, CaseInsensitiveStringMap readOptions) {
+    String batchReadsSessionConf = SparkSession.active().conf()
+        .get("spark.sql.iceberg.vectorization.enabled", null);
+    if (batchReadsSessionConf != null) {
+      return Boolean.valueOf(batchReadsSessionConf);
+    }
     return readOptions.getBoolean("vectorization-enabled",
         PropertyUtil.propertyAsBoolean(properties,
             TableProperties.PARQUET_VECTORIZATION_ENABLED, TableProperties.PARQUET_VECTORIZATION_ENABLED_DEFAULT));
@@ -527,6 +532,10 @@ public class Spark3Util {
           return pred.ref().name() + " IS NULL";
         case NOT_NULL:
           return pred.ref().name() + " IS NOT NULL";
+        case IS_NAN:
+          return "is_nan(" + pred.ref().name() + ")";
+        case NOT_NAN:
+          return "not_nan(" + pred.ref().name() + ")";
         case LT:
           return pred.ref().name() + " < " + sqlString(pred.literal());
         case LT_EQ:
@@ -596,10 +605,28 @@ public class Spark3Util {
   }
 
   public static CatalogAndIdentifier catalogAndIdentifier(SparkSession spark, String name) throws ParseException {
+    return catalogAndIdentifier(spark, name, spark.sessionState().catalogManager().currentCatalog());
+  }
+
+  public static CatalogAndIdentifier catalogAndIdentifier(SparkSession spark, String name,
+                                                          CatalogPlugin defaultCatalog) throws ParseException {
     ParserInterface parser = spark.sessionState().sqlParser();
     Seq<String> multiPartIdentifier = parser.parseMultipartIdentifier(name);
     List<String> javaMultiPartIdentifier = JavaConverters.seqAsJavaList(multiPartIdentifier);
-    return catalogAndIdentifier(spark, javaMultiPartIdentifier);
+    return catalogAndIdentifier(spark, javaMultiPartIdentifier, defaultCatalog);
+  }
+
+  public static CatalogAndIdentifier catalogAndIdentifier(String description, SparkSession spark,
+                                                          String name, CatalogPlugin defaultCatalog) {
+    try {
+      return catalogAndIdentifier(spark, name, defaultCatalog);
+    } catch (ParseException e) {
+      throw new IllegalArgumentException("Cannot parse " + description + ": " + name, e);
+    }
+  }
+
+  public static CatalogAndIdentifier catalogAndIdentifier(SparkSession spark, List<String> nameParts) {
+    return catalogAndIdentifier(spark, nameParts, spark.sessionState().catalogManager().currentCatalog());
   }
 
   /**
@@ -607,20 +634,26 @@ public class Spark3Util {
    * Attempts to find the catalog and identifier a multipart identifier represents
    * @param spark Spark session to use for resolution
    * @param nameParts Multipart identifier representing a table
+   * @param defaultCatalog Catalog to use if none is specified
    * @return The CatalogPlugin and Identifier for the table
    */
-  public static CatalogAndIdentifier catalogAndIdentifier(SparkSession spark, List<String> nameParts) {
+  public static CatalogAndIdentifier catalogAndIdentifier(SparkSession spark, List<String> nameParts,
+                                                          CatalogPlugin defaultCatalog) {
     Preconditions.checkArgument(!nameParts.isEmpty(),
         "Cannot determine catalog and Identifier from empty name parts");
     CatalogManager catalogManager = spark.sessionState().catalogManager();
-    CatalogPlugin currentCatalog = catalogManager.currentCatalog();
-    String[] currentNamespace = catalogManager.currentNamespace();
     int lastElementIndex = nameParts.size() - 1;
     String name = nameParts.get(lastElementIndex);
+    String[] currentNamespace;
+    if (defaultCatalog.equals(catalogManager.currentCatalog())) {
+      currentNamespace = catalogManager.currentNamespace();
+    } else {
+      currentNamespace = defaultCatalog.defaultNamespace();
+    }
 
     if (nameParts.size() == 1) {
       // Only a single element, use current catalog and namespace
-      return new CatalogAndIdentifier(currentCatalog, Identifier.of(currentNamespace, name));
+      return new CatalogAndIdentifier(defaultCatalog, Identifier.of(currentNamespace, name));
     } else {
       try {
         // Assume the first element is a valid catalog
@@ -630,7 +663,7 @@ public class Spark3Util {
       } catch (Exception e) {
         // The first element was not a valid catalog, treat it like part of the namespace
         String[] namespace =  nameParts.subList(0, lastElementIndex).toArray(new String[0]);
-        return new CatalogAndIdentifier(currentCatalog, Identifier.of(namespace, name));
+        return new CatalogAndIdentifier(defaultCatalog, Identifier.of(namespace, name));
       }
     }
   }

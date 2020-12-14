@@ -20,7 +20,8 @@
 package org.apache.iceberg.spark.extensions
 
 import org.apache.spark.sql.SparkSessionExtensions
-import org.apache.spark.sql.catalyst.analysis.ResolveProcedures
+import org.apache.spark.sql.catalyst.analysis.{DeleteFromTablePredicateCheck, ProcedureArgumentCoercion, ResolveProcedures}
+import org.apache.spark.sql.catalyst.optimizer.{OptimizeConditionsInRowLevelOperations, PullupCorrelatedPredicatesInRowLevelOperations, RewriteDelete}
 import org.apache.spark.sql.catalyst.parser.extensions.IcebergSparkSqlExtensionsParser
 import org.apache.spark.sql.execution.datasources.v2.ExtendedDataSourceV2Strategy
 
@@ -29,6 +30,13 @@ class IcebergSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
   override def apply(extensions: SparkSessionExtensions): Unit = {
     extensions.injectParser { case (_, parser) => new IcebergSparkSqlExtensionsParser(parser) }
     extensions.injectResolutionRule { spark => ResolveProcedures(spark) }
+    extensions.injectResolutionRule { _ => ProcedureArgumentCoercion }
+    extensions.injectCheckRule { _ => DeleteFromTablePredicateCheck }
+    // TODO: RewriteDelete should be executed after the operator optimization batch
+    extensions.injectOptimizerRule { _ => OptimizeConditionsInRowLevelOperations }
+    // TODO: PullupCorrelatedPredicates should handle row-level operations
+    extensions.injectOptimizerRule { _ => PullupCorrelatedPredicatesInRowLevelOperations }
+    extensions.injectOptimizerRule { _ => RewriteDelete }
     extensions.injectPlannerStrategy { _ => ExtendedDataSourceV2Strategy }
   }
 }

@@ -68,6 +68,7 @@ Iceberg tables support table properties to configure table behavior, like the de
 | write.summary.partition-limit      | 0                  | Includes partition-level summary stats in snapshot summaries if the changed partition count is less than this limit |
 | write.metadata.delete-after-commit.enabled | false      | Controls whether to delete the oldest version metadata files after commit |
 | write.metadata.previous-versions-max       | 100        | The max number of previous version metadata files to keep before deleting after commit |
+| write.spark.fanout.enabled       | false        | Enables Partitioned-Fanout-Writer writes in Spark |
 
 ### Table behavior properties
 
@@ -80,6 +81,8 @@ Iceberg tables support table properties to configure table behavior, like the de
 | commit.manifest.target-size-bytes  | 8388608 (8 MB)   | Target size when merging manifest files                       |
 | commit.manifest.min-count-to-merge | 100              | Minimum number of manifests to accumulate before merging      |
 | commit.manifest-merge.enabled      | true             | Controls whether to automatically merge manifests on writes   |
+| history.expire.max-snapshot-age-ms | 432000000 (5 days) | Default max age of snapshots to keep while expiring snapshots    |
+| history.expire.min-snapshots-to-keep | 1                | Default min number of snapshots to keep while expiring snapshots |
 
 ### Compatibility flags
 
@@ -91,10 +94,16 @@ Iceberg tables support table properties to configure table behavior, like the de
 
 The following properties from the Hadoop configuration are used by the Hive Metastore connector.
 
-| Property                           | Default          | Description                                                   |
-| ---------------------------------- | ---------------- | ------------------------------------------------------------- |
-| iceberg.hive.client-pool-size      | 5                | The size of the Hive client pool when tracking tables in HMS  |
-| iceberg.hive.lock-timeout-ms       | 180000 (3 min)   | Maximum time in milliseconds to acquire a lock                |
+| Property                              | Default          | Description                                                                        |
+| ------------------------------------- | ---------------- | ---------------------------------------------------------------------------------- |
+| iceberg.hive.client-pool-size         | 5                | The size of the Hive client pool when tracking tables in HMS                       |
+| iceberg.hive.lock-timeout-ms          | 180000 (3 min)   | Maximum time in milliseconds to acquire a lock                                     |
+| iceberg.hive.lock-check-min-wait-ms   | 50               | Minimum time in milliseconds to check back on the status of lock acquisition       |
+| iceberg.hive.lock-check-max-wait-ms   | 5000             | Maximum time in milliseconds to check back on the status of lock acquisition       |
+
+Note: `iceberg.hive.lock-check-max-wait-ms` should be less than the [transaction timeout](https://cwiki.apache.org/confluence/display/Hive/Configuration+Properties#ConfigurationProperties-hive.txn.timeout) 
+of the Hive Metastore (`hive.txn.timeout` or `metastore.txn.timeout` in the newer versions). Otherwise, the heartbeats on the lock (which happens during the lock checks) would end up expiring in the 
+Hive Metastore before the lock is retried from Iceberg.
 
 ## Spark configuration
 
@@ -155,4 +164,5 @@ df.write
 | target-file-size-bytes | As per table property      | Overrides this table's write.target-file-size-bytes          |
 | check-nullability      | true                       | Sets the nullable check on fields                            |
 | snapshot-property._custom-key_    | null            | Adds an entry with custom-key and corresponding value in the snapshot summary  |
+| fanout-enabled       | false        | Overrides this table's write.spark.fanout.enabled  |
 
