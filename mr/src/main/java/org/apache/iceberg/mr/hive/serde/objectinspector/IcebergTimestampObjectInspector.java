@@ -21,55 +21,32 @@ package org.apache.iceberg.mr.hive.serde.objectinspector;
 
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneId;
 import org.apache.hadoop.hive.serde2.io.TimestampWritable;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.AbstractPrimitiveJavaObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.TimestampObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoFactory;
 
-public abstract class IcebergTimestampObjectInspector extends AbstractPrimitiveJavaObjectInspector
+public class IcebergTimestampObjectInspector extends AbstractPrimitiveJavaObjectInspector
     implements TimestampObjectInspector, WriteObjectInspector {
 
-  private static final IcebergTimestampObjectInspector INSTANCE_WITH_ZONE = new IcebergTimestampObjectInspector() {
-    @Override
-    LocalDateTime toLocalDateTime(Object o) {
-      return ((OffsetDateTime) o).toLocalDateTime();
-    }
+  private static final IcebergTimestampObjectInspector INSTANCE = new IcebergTimestampObjectInspector();
 
-    @Override
-    public OffsetDateTime convert(Object o) {
-      return o == null ? null :
-          OffsetDateTime.ofInstant(((TimestampWritable) o).getTimestamp().toInstant(), ZoneId.of("UTC"));
-    }
-  };
-
-  private static final IcebergTimestampObjectInspector INSTANCE_WITHOUT_ZONE = new IcebergTimestampObjectInspector() {
-    @Override
-    LocalDateTime toLocalDateTime(Object o) {
-      return (LocalDateTime) o;
-    }
-
-    @Override
-    public LocalDateTime convert(Object o) {
-      return o == null ? null : ((TimestampWritable) o).getTimestamp().toLocalDateTime();
-    }
-  };
-
-  public static IcebergTimestampObjectInspector get(boolean adjustToUTC) {
-    return adjustToUTC ? INSTANCE_WITH_ZONE : INSTANCE_WITHOUT_ZONE;
+  public static IcebergTimestampObjectInspector get() {
+    return INSTANCE;
   }
 
   private IcebergTimestampObjectInspector() {
     super(TypeInfoFactory.timestampTypeInfo);
   }
 
-
-  abstract LocalDateTime toLocalDateTime(Object object);
+  @Override
+  public LocalDateTime convert(Object o) {
+    return o == null ? null : ((TimestampWritable) o).getTimestamp().toLocalDateTime();
+  }
 
   @Override
   public Timestamp getPrimitiveJavaObject(Object o) {
-    return o == null ? null : Timestamp.valueOf(toLocalDateTime(o));
+    return o == null ? null : Timestamp.valueOf((LocalDateTime) o);
   }
 
   @Override
@@ -80,22 +57,16 @@ public abstract class IcebergTimestampObjectInspector extends AbstractPrimitiveJ
 
   @Override
   public Object copyObject(Object o) {
-    if (o == null) {
-      return null;
-    }
-
     if (o instanceof Timestamp) {
       Timestamp ts = (Timestamp) o;
       Timestamp copy = new Timestamp(ts.getTime());
       copy.setNanos(ts.getNanos());
       return copy;
-    } else if (o instanceof OffsetDateTime) {
-      return OffsetDateTime.of(((OffsetDateTime) o).toLocalDateTime(), ((OffsetDateTime) o).getOffset());
     } else if (o instanceof LocalDateTime) {
-      return LocalDateTime.of(((LocalDateTime) o).toLocalDate(), ((LocalDateTime) o).toLocalTime());
+      LocalDateTime ldt = (LocalDateTime) o;
+      return LocalDateTime.of(ldt.toLocalDate(), ldt.toLocalTime());
     } else {
       return o;
     }
   }
-
 }

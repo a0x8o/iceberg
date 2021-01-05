@@ -19,12 +19,13 @@
 
 package org.apache.iceberg.aws;
 
+import java.io.Serializable;
 import java.util.Map;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.util.PropertyUtil;
 import software.amazon.awssdk.services.s3.model.ObjectCannedACL;
 
-public class AwsProperties {
+public class AwsProperties implements Serializable {
 
   /**
    * Type of S3 Server side encryption used, default to {@link AwsProperties#S3FILEIO_SSE_TYPE_NONE}.
@@ -128,6 +129,13 @@ public class AwsProperties {
    * For more details: https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html
    */
   public static final String S3FILEIO_ACL = "s3fileio.acl";
+
+  /**
+   * The implementation class of {@link AwsClientFactory} to customize AWS client configurations.
+   * If set, all AWS clients will be initialized by the specified factory.
+   * If not set, {@link AwsClientFactories#defaultFactory()} is used as default factory.
+   */
+  public static final String CLIENT_FACTORY = "client.factory";
 
   private String s3FileIoSseType;
   private String s3FileIoSseKey;
@@ -263,7 +271,7 @@ public class AwsProperties {
     this.s3FileIoMultipartThresholdFactor = factor;
   }
 
-  public String getS3fileIoStagingDirectory() {
+  public String s3fileIoStagingDirectory() {
     return s3fileIoStagingDirectory;
   }
 

@@ -25,6 +25,7 @@ we only integrate iceberg with apache flink 1.11.x .
 | [SQL create catalog](#creating-catalogs-and-using-catalogs)            | ✔️                 |                                                        |
 | [SQL create database](#create-database)                                | ✔️                 |                                                        |
 | [SQL create table](#create-table)                                      | ✔️                 |                                                        |
+| [SQL create table like](#create-table-like)                            | ✔️                 |                                                        |
 | [SQL alter table](#alter-table)                                        | ✔️                 | Only support altering table properties, Columns/PartitionKey changes are not supported now|
 | [SQL drop_table](#drop-table)                                          | ✔️                 |                                                        |
 | [SQL select](#querying-with-sql)                                       | ✔️                 | Only support batch mode now.                           |
@@ -69,7 +70,7 @@ export HADOOP_CLASSPATH=`$HADOOP_HOME/bin/hadoop classpath`
 ./bin/sql-client.sh embedded -j <flink-runtime-directory>/iceberg-flink-runtime-xxx.jar shell
 ```
 
-By default, iceberg has included hadoop jars for hadoop catalog. If we want to use hive catalog, we will need to load the hive jars when opening the flink sql client. Fortunately, apache flink has provided a [bundled hive jar](https://ci.apache.org/projects/flink/flink-docs-stable/dev/table/hive/#using-bundled-hive-jar) for sql client. So we could open the sql client
+By default, iceberg has included hadoop jars for hadoop catalog. If we want to use hive catalog, we will need to load the hive jars when opening the flink sql client. Fortunately, apache flink has provided a [bundled hive jar](https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-hive-2.3.6_2.11/1.11.0/flink-sql-connector-hive-2.3.6_2.11-1.11.0.jar) for sql client. So we could open the sql client
 as the following:
 
 ```bash
@@ -183,6 +184,22 @@ CREATE TABLE hive_catalog.default.sample (
 
 Apache Iceberg support hidden partition but apache flink don't support partitioning by a function on columns, so we've no way to support hidden partition in flink DDL now, we will improve apache flink DDL in future.
 
+### `CREATE TABLE LIKE`
+
+To create a table with the same schema, partitioning, and table properties as another table, use `CREATE TABLE LIKE`.
+
+```sql
+CREATE TABLE hive_catalog.default.sample (
+    id BIGINT COMMENT 'unique id',
+    data STRING
+);
+
+CREATE TABLE  hive_catalog.default.sample_like LIKE hive_catalog.default.sample;
+```
+
+For more details, refer to the [Flink `CREATE TABLE` documentation](https://ci.apache.org/projects/flink/flink-docs-release-1.11/dev/table/sql/create.html#create-table).
+
+
 ### `ALTER TABLE`
 
 Iceberg only support altering table properties in flink 1.11 now.
@@ -210,7 +227,7 @@ DROP TABLE hive_catalog.default.sample;
 Iceberg does not support streaming read in flink now, it's still working in-progress. But it support batch read to scan the existing records in iceberg table.
 
 ```sql
--- Execute the flink job in streaming mode for current session context
+-- Execute the flink job in batch mode for current session context
 SET execution.type = batch ;
 SELECT * FROM sample       ;
 ```

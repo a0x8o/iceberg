@@ -66,12 +66,35 @@ singleStatement
     ;
 
 statement
-    : CALL multipartIdentifier '(' (callArgument (',' callArgument)*)? ')'   #call
+    : CALL multipartIdentifier '(' (callArgument (',' callArgument)*)? ')'                  #call
+    | ALTER TABLE multipartIdentifier ADD PARTITION FIELD transform (AS name=identifier)?   #addPartitionField
+    | ALTER TABLE multipartIdentifier DROP PARTITION FIELD transform                        #dropPartitionField
+    | ALTER TABLE multipartIdentifier WRITE ORDERED BY order                                #setTableOrder
     ;
 
 callArgument
     : expression                    #positionalArgument
     | identifier '=>' expression    #namedArgument
+    ;
+
+order
+    : fields+=orderField (',' fields+=orderField)*
+    | '(' fields+=orderField (',' fields+=orderField)* ')'
+    ;
+
+orderField
+    : transform direction=(ASC | DESC)? (NULLS nullOrder=(FIRST | LAST))?
+    ;
+
+transform
+    : multipartIdentifier                                                       #identityTransform
+    | transformName=identifier
+      '(' arguments+=transformArgument (',' arguments+=transformArgument)* ')'  #applyTransform
+    ;
+
+transformArgument
+    : multipartIdentifier
+    | constant
     ;
 
 expression
@@ -121,12 +144,27 @@ quotedIdentifier
     ;
 
 nonReserved
-    : CALL
+    : ADD | ALTER | AS | ASC | BY | CALL | DESC | DROP | FIELD | FIRST | LAST | NULLS | ORDERED | PARTITION | TABLE | WRITE
     | TRUE | FALSE
     | MAP
     ;
 
+ADD: 'ADD';
+ALTER: 'ALTER';
+AS: 'AS';
+ASC: 'ASC';
+BY: 'BY';
 CALL: 'CALL';
+DESC: 'DESC';
+DROP: 'DROP';
+FIELD: 'FIELD';
+FIRST: 'FIRST';
+LAST: 'LAST';
+NULLS: 'NULLS';
+ORDERED: 'ORDERED';
+PARTITION: 'PARTITION';
+TABLE: 'TABLE';
+WRITE: 'WRITE';
 
 TRUE: 'TRUE';
 FALSE: 'FALSE';

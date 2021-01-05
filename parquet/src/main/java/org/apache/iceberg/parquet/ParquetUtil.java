@@ -28,13 +28,13 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.iceberg.FieldMetrics;
 import org.apache.iceberg.Metrics;
 import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.MetricsModes;
 import org.apache.iceberg.MetricsModes.MetricsMode;
+import org.apache.iceberg.MetricsUtil;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.expressions.Literal;
@@ -113,8 +113,7 @@ public class ParquetUtil {
 
         increment(columnSizes, fieldId, column.getTotalSize());
 
-        String columnName = fileSchema.findColumnName(fieldId);
-        MetricsMode metricsMode = metricsConfig.columnMode(columnName);
+        MetricsMode metricsMode = MetricsUtil.metricsMode(fileSchema, metricsConfig, fieldId);
         if (metricsMode == MetricsModes.None.get()) {
           continue;
         }
@@ -149,23 +148,8 @@ public class ParquetUtil {
     }
 
     return new Metrics(rowCount, columnSizes, valueCounts, nullValueCounts,
-        getNanValueCounts(fieldMetrics, metricsConfig, fileSchema),
+        MetricsUtil.createNanValueCounts(fieldMetrics, metricsConfig, fileSchema),
         toBufferMap(fileSchema, lowerBounds), toBufferMap(fileSchema, upperBounds));
-  }
-
-  private static Map<Integer, Long> getNanValueCounts(
-      Stream<FieldMetrics> fieldMetrics, MetricsConfig metricsConfig, Schema inputSchema) {
-    if (fieldMetrics == null || inputSchema == null) {
-      return Maps.newHashMap();
-    }
-
-    return fieldMetrics
-        .filter(metrics -> {
-          String columnName = inputSchema.findColumnName(metrics.id());
-          MetricsMode metricsMode = metricsConfig.columnMode(columnName);
-          return metricsMode != MetricsModes.None.get();
-        })
-        .collect(Collectors.toMap(FieldMetrics::id, FieldMetrics::nanValueCount));
   }
 
   private static MessageType getParquetTypeWithIds(ParquetMetadata metadata, NameMapping nameMapping) {
@@ -293,7 +277,7 @@ public class ParquetUtil {
     }
 
     // without EncodingStats, fall back to testing the encoding list
-    Set<Encoding> encodings = new HashSet<Encoding>(meta.getEncodings());
+    Set<Encoding> encodings = new HashSet<>(meta.getEncodings());
     if (encodings.remove(Encoding.PLAIN_DICTIONARY)) {
       // if remove returned true, PLAIN_DICTIONARY was present, which means at
       // least one page was dictionary encoded and 1.0 encodings are used
