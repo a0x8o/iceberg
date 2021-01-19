@@ -19,35 +19,38 @@
 
 package org.apache.iceberg.mr.hive.serde.objectinspector;
 
-import java.sql.Date;
-import java.time.LocalDate;
-import org.apache.hadoop.hive.serde2.io.DateWritable;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.AbstractPrimitiveJavaObjectInspector;
-import org.apache.hadoop.hive.serde2.objectinspector.primitive.DateObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.StringObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoFactory;
-import org.apache.iceberg.util.DateTimeUtil;
+import org.apache.hadoop.io.Text;
 
-public final class IcebergDateObjectInspector extends AbstractPrimitiveJavaObjectInspector
-    implements DateObjectInspector, WriteObjectInspector {
+public class IcebergTimeObjectInspector extends AbstractPrimitiveJavaObjectInspector
+    implements StringObjectInspector, WriteObjectInspector {
 
-  private static final IcebergDateObjectInspector INSTANCE = new IcebergDateObjectInspector();
+  private static final IcebergTimeObjectInspector INSTANCE = new IcebergTimeObjectInspector();
 
-  public static IcebergDateObjectInspector get() {
+  private IcebergTimeObjectInspector() {
+    super(TypeInfoFactory.stringTypeInfo);
+  }
+
+  public static IcebergTimeObjectInspector get() {
     return INSTANCE;
   }
 
-  private IcebergDateObjectInspector() {
-    super(TypeInfoFactory.dateTypeInfo);
+  @Override
+  public String getPrimitiveJavaObject(Object o) {
+    return o == null ? null : o.toString();
   }
 
   @Override
-  public Date getPrimitiveJavaObject(Object o) {
-    return o == null ? null : Date.valueOf((LocalDate) o);
+  public Text getPrimitiveWritableObject(Object o) {
+    String value = getPrimitiveJavaObject(o);
+    return value == null ? null : new Text(value);
   }
 
   @Override
-  public DateWritable getPrimitiveWritableObject(Object o) {
-    return o == null ? null : new DateWritable(DateTimeUtil.daysFromDate((LocalDate) o));
+  public Object convert(Object o) {
+    return o == null ? null : o.toString();
   }
 
   @Override
@@ -56,17 +59,10 @@ public final class IcebergDateObjectInspector extends AbstractPrimitiveJavaObjec
       return null;
     }
 
-    if (o instanceof Date) {
-      return new Date(((Date) o).getTime());
-    } else if (o instanceof LocalDate) {
-      return LocalDate.of(((LocalDate) o).getYear(), ((LocalDate) o).getMonth(), ((LocalDate) o).getDayOfMonth());
+    if (o instanceof Text) {
+      return new Text((Text) o);
     } else {
       return o;
     }
-  }
-
-  @Override
-  public LocalDate convert(Object o) {
-    return o == null ? null : ((Date) o).toLocalDate();
   }
 }

@@ -19,49 +19,46 @@
 
 package org.apache.iceberg.mr.hive.serde.objectinspector;
 
-import java.sql.Timestamp;
-import java.time.LocalDateTime;
-import org.apache.hadoop.hive.serde2.io.TimestampWritable;
+import java.util.UUID;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoFactory;
+import org.apache.hadoop.io.Text;
 import org.junit.Assert;
 import org.junit.Test;
 
-public class TestIcebergTimestampObjectInspector {
+public class TestIcebergUUIDObjectInspector {
 
   @Test
-  public void testIcebergTimestampObjectInspector() {
-    IcebergTimestampObjectInspector oi = IcebergTimestampObjectInspector.get();
+  public void testIcebergUUIDObjectInspector() {
+    IcebergUUIDObjectInspector oi = IcebergUUIDObjectInspector.get();
 
     Assert.assertEquals(ObjectInspector.Category.PRIMITIVE, oi.getCategory());
-    Assert.assertEquals(PrimitiveObjectInspector.PrimitiveCategory.TIMESTAMP, oi.getPrimitiveCategory());
+    Assert.assertEquals(PrimitiveObjectInspector.PrimitiveCategory.STRING, oi.getPrimitiveCategory());
 
-    Assert.assertEquals(TypeInfoFactory.timestampTypeInfo, oi.getTypeInfo());
-    Assert.assertEquals(TypeInfoFactory.timestampTypeInfo.getTypeName(), oi.getTypeName());
+    Assert.assertEquals(TypeInfoFactory.stringTypeInfo, oi.getTypeInfo());
+    Assert.assertEquals(TypeInfoFactory.stringTypeInfo.getTypeName(), oi.getTypeName());
 
-    Assert.assertEquals(Timestamp.class, oi.getJavaPrimitiveClass());
-    Assert.assertEquals(TimestampWritable.class, oi.getPrimitiveWritableClass());
+    Assert.assertEquals(String.class, oi.getJavaPrimitiveClass());
+    Assert.assertEquals(Text.class, oi.getPrimitiveWritableClass());
 
     Assert.assertNull(oi.copyObject(null));
     Assert.assertNull(oi.getPrimitiveJavaObject(null));
     Assert.assertNull(oi.getPrimitiveWritableObject(null));
     Assert.assertNull(oi.convert(null));
 
-    LocalDateTime local = LocalDateTime.of(2020, 1, 1, 12, 55, 30, 5560000);
-    Timestamp ts = Timestamp.valueOf(local);
+    String uuid = UUID.randomUUID().toString();
+    Text text = new Text(uuid);
 
-    Assert.assertEquals(ts, oi.getPrimitiveJavaObject(local));
-    Assert.assertEquals(new TimestampWritable(ts), oi.getPrimitiveWritableObject(local));
+    Assert.assertEquals(uuid, oi.getPrimitiveJavaObject(text));
+    Assert.assertEquals(text, oi.getPrimitiveWritableObject(uuid));
+    Assert.assertEquals(uuid, oi.convert(text));
 
-    Timestamp copy = (Timestamp) oi.copyObject(ts);
+    Text copy = (Text) oi.copyObject(text);
 
-    Assert.assertEquals(ts, copy);
-    Assert.assertNotSame(ts, copy);
+    Assert.assertEquals(text, copy);
+    Assert.assertNotSame(text, copy);
 
     Assert.assertFalse(oi.preferWritable());
-
-    Assert.assertEquals(local, oi.convert(ts));
   }
-
 }
