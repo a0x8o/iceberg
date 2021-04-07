@@ -19,29 +19,21 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import org.apache.iceberg.DistributionMode
-import org.apache.iceberg.TableProperties
 import org.apache.iceberg.TableProperties.MERGE_CARDINALITY_CHECK_ENABLED
 import org.apache.iceberg.TableProperties.MERGE_CARDINALITY_CHECK_ENABLED_DEFAULT
-import org.apache.iceberg.spark.Spark3Util.toClusteredDistribution
-import org.apache.iceberg.spark.Spark3Util.toOrderedDistribution
-import org.apache.iceberg.spark.source.SparkTable
 import org.apache.iceberg.util.PropertyUtil
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.analysis.Resolver
 import org.apache.spark.sql.catalyst.expressions.Alias
-import org.apache.spark.sql.catalyst.expressions.Ascending
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.expressions.IsNull
+import org.apache.spark.sql.catalyst.expressions.IsNotNull
 import org.apache.spark.sql.catalyst.expressions.Literal
-import org.apache.spark.sql.catalyst.expressions.NullsFirst
-import org.apache.spark.sql.catalyst.expressions.SortOrder
 import org.apache.spark.sql.catalyst.plans.FullOuter
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.LeftAnti
 import org.apache.spark.sql.catalyst.plans.RightOuter
 import org.apache.spark.sql.catalyst.plans.logical.AppendData
 import org.apache.spark.sql.catalyst.plans.logical.DeleteAction
+import org.apache.spark.sql.catalyst.plans.logical.Filter
 import org.apache.spark.sql.catalyst.plans.logical.InsertAction
 import org.apache.spark.sql.catalyst.plans.logical.Join
 import org.apache.spark.sql.catalyst.plans.logical.JoinHint
@@ -51,10 +43,7 @@ import org.apache.spark.sql.catalyst.plans.logical.MergeInto
 import org.apache.spark.sql.catalyst.plans.logical.MergeIntoParams
 import org.apache.spark.sql.catalyst.plans.logical.MergeIntoTable
 import org.apache.spark.sql.catalyst.plans.logical.Project
-import org.apache.spark.sql.catalyst.plans.logical.Repartition
-import org.apache.spark.sql.catalyst.plans.logical.RepartitionByExpression
 import org.apache.spark.sql.catalyst.plans.logical.ReplaceData
-import org.apache.spark.sql.catalyst.plans.logical.Sort
 import org.apache.spark.sql.catalyst.plans.logical.UpdateAction
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.utils.PlanUtils.isIcebergRelation
@@ -62,20 +51,41 @@ import org.apache.spark.sql.catalyst.utils.RewriteRowLevelOperationHelper
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.iceberg.write.MergeBuilder
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.execution.datasources.v2.ExtendedDataSourceV2Implicits
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.BooleanType
 
 case class RewriteMergeInto(spark: SparkSession) extends Rule[LogicalPlan] with RewriteRowLevelOperationHelper  {
-  private val ROW_FROM_SOURCE = "_row_from_source_"
-  private val ROW_FROM_TARGET = "_row_from_target_"
-  private val TRUE_LITERAL = Literal(true, BooleanType)
-  private val FALSE_LITERAL = Literal(false, BooleanType)
-
-  import org.apache.spark.sql.execution.datasources.v2.ExtendedDataSourceV2Implicits._
-
-  override def resolver: Resolver = spark.sessionState.conf.resolver
+  import ExtendedDataSourceV2Implicits._
+  import RewriteMergeInto._
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
-    plan resolveOperators {
+    plan transform {
+      case MergeIntoTable(target: DataSourceV2Relation, source, cond, matchedActions, notMatchedActions)
+          if matchedActions.isEmpty && notMatchedActions.size == 1 && isIcebergRelation(target) =>
+
+        val targetTableScan = buildSimpleScanPlan(target, cond)
+
+        // NOT MATCHED conditions may only refer to columns in source so we can push them down
+        val insertAction = notMatchedActions.head.asInstanceOf[InsertAction]
+        val filteredSource = insertAction.condition match {
+          case Some(insertCond) => Filter(insertCond, source)
+          case None => source
+        }
+
+        // when there are no matched actions, use a left anti join to remove any matching rows and rewrite to use
+        // append instead of replace. only unmatched source rows are passed to the merge and actions are all inserts.
+        val joinPlan = Join(filteredSource, targetTableScan, LeftAnti, Some(cond), JoinHint.NONE)
+
+        val outputExprs = insertAction.assignments.map(_.value)
+        val outputColNames = target.output.map(_.name)
+        val outputCols = outputExprs.zip(outputColNames).map { case (expr, name) => Alias(expr, name)() }
+        val mergePlan = Project(outputCols, joinPlan)
+
+        val writePlan = buildWritePlan(mergePlan, target.table)
+
+        AppendData.byPosition(target, writePlan, Map.empty)
+
       case MergeIntoTable(target: DataSourceV2Relation, source, cond, matchedActions, notMatchedActions)
           if matchedActions.isEmpty && isIcebergRelation(target) =>
 
@@ -86,8 +96,8 @@ case class RewriteMergeInto(spark: SparkSession) extends Rule[LogicalPlan] with 
         val joinPlan = Join(source, targetTableScan, LeftAnti, Some(cond), JoinHint.NONE)
 
         val mergeParams = MergeIntoParams(
-          isSourceRowNotPresent = FALSE_LITERAL,
-          isTargetRowNotPresent = TRUE_LITERAL,
+          isSourceRowPresent = TRUE_LITERAL,
+          isTargetRowPresent = FALSE_LITERAL,
           matchedConditions = Nil,
           matchedOutputs = Nil,
           notMatchedConditions = notMatchedActions.map(getClauseCondition),
@@ -117,8 +127,8 @@ case class RewriteMergeInto(spark: SparkSession) extends Rule[LogicalPlan] with 
         val joinPlan = Join(newSourceTableScan, targetTableScan, RightOuter, Some(cond), JoinHint.NONE)
 
         val mergeParams = MergeIntoParams(
-          isSourceRowNotPresent = IsNull(findOutputAttr(joinPlan.output, ROW_FROM_SOURCE)),
-          isTargetRowNotPresent = FALSE_LITERAL,
+          isSourceRowPresent = IsNotNull(findOutputAttr(joinPlan.output, ROW_FROM_SOURCE)),
+          isTargetRowPresent = TRUE_LITERAL,
           matchedConditions = matchedConditions,
           matchedOutputs = matchedOutputs,
           notMatchedConditions = Nil,
@@ -149,8 +159,8 @@ case class RewriteMergeInto(spark: SparkSession) extends Rule[LogicalPlan] with 
         val joinPlan = Join(newSourceTableScan, newTargetTableScan, FullOuter, Some(cond), JoinHint.NONE)
 
         val mergeParams = MergeIntoParams(
-          isSourceRowNotPresent = IsNull(findOutputAttr(joinPlan.output, ROW_FROM_SOURCE)),
-          isTargetRowNotPresent = IsNull(findOutputAttr(joinPlan.output, ROW_FROM_TARGET)),
+          isSourceRowPresent = IsNotNull(findOutputAttr(joinPlan.output, ROW_FROM_SOURCE)),
+          isTargetRowPresent = IsNotNull(findOutputAttr(joinPlan.output, ROW_FROM_TARGET)),
           matchedConditions = matchedConditions,
           matchedOutputs = matchedOutputs,
           notMatchedConditions = notMatchedActions.map(getClauseCondition),
@@ -232,48 +242,11 @@ case class RewriteMergeInto(spark: SparkSession) extends Rule[LogicalPlan] with 
     }
     !(actions.size == 1 && hasUnconditionalDelete(actions.headOption))
   }
-
-  def buildWritePlan(
-     childPlan: LogicalPlan,
-     table: Table): LogicalPlan = {
-    val defaultDistributionMode = table match {
-      case iceberg: SparkTable if !iceberg.table.sortOrder.isUnsorted =>
-        TableProperties.WRITE_DISTRIBUTION_MODE_RANGE
-      case _ =>
-        TableProperties.WRITE_DISTRIBUTION_MODE_DEFAULT
-    }
-
-    table match {
-      case iceTable: SparkTable =>
-        val numShufflePartitions = spark.sessionState.conf.numShufflePartitions
-        val table = iceTable.table()
-        val distributionMode: String = table.properties
-          .getOrDefault(TableProperties.WRITE_DISTRIBUTION_MODE, defaultDistributionMode)
-        val order = toCatalyst(toOrderedDistribution(table.spec(), table.sortOrder(), true), childPlan)
-        DistributionMode.fromName(distributionMode) match {
-          case DistributionMode.NONE =>
-            Sort(buildSortOrder(order), global = false, childPlan)
-          case DistributionMode.HASH =>
-            val clustering = toCatalyst(toClusteredDistribution(table.spec()), childPlan)
-            val hashPartitioned = RepartitionByExpression(clustering, childPlan, numShufflePartitions)
-            Sort(buildSortOrder(order), global = false, hashPartitioned)
-          case DistributionMode.RANGE =>
-            val roundRobin = Repartition(numShufflePartitions, shuffle = true, childPlan)
-            Sort(buildSortOrder(order), global = true, roundRobin)
-        }
-      case _ =>
-        childPlan
-    }
-  }
-
-  private def buildSortOrder(exprs: Seq[Expression]): Seq[SortOrder] = {
-    exprs.map { expr =>
-      expr match {
-        case e: SortOrder => e
-        case other =>
-          SortOrder(other, Ascending, NullsFirst, Set.empty)
-      }
-    }
-  }
 }
 
+object RewriteMergeInto {
+  private final val ROW_FROM_SOURCE = "_row_from_source_"
+  private final val ROW_FROM_TARGET = "_row_from_target_"
+  private final val TRUE_LITERAL = Literal(true, BooleanType)
+  private final val FALSE_LITERAL = Literal(false, BooleanType)
+}

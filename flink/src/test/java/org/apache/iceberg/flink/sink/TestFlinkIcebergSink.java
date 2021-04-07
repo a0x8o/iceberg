@@ -21,9 +21,6 @@ package org.apache.iceberg.flink.sink;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,36 +32,42 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.util.DataFormatConverters;
-import org.apache.flink.table.runtime.typeutils.RowDataTypeInfo;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.types.Row;
 import org.apache.iceberg.AssertHelpers;
 import org.apache.iceberg.DistributionMode;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.flink.MiniClusterResource;
 import org.apache.iceberg.flink.SimpleDataUtil;
 import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.flink.source.BoundedTestSource;
+import org.apache.iceberg.flink.util.FlinkCompatibilityUtil;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.Rule;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 @RunWith(Parameterized.class)
-public class TestFlinkIcebergSink extends AbstractTestBase {
+public class TestFlinkIcebergSink {
+
+  @ClassRule
+  public static final MiniClusterWithClientResource MINI_CLUSTER_RESOURCE =
+      MiniClusterResource.createWithClassloaderCheckDisabled();
+
+  @ClassRule
+  public static final TemporaryFolder TEMPORARY_FOLDER = new TemporaryFolder();
+
   private static final TypeInformation<Row> ROW_TYPE_INFO = new RowTypeInfo(
       SimpleDataUtil.FLINK_SCHEMA.getFieldTypes());
   private static final DataFormatConverters.RowConverter CONVERTER = new DataFormatConverters.RowConverter(
       SimpleDataUtil.FLINK_SCHEMA.getFieldDataTypes());
-
-  @Rule
-  public TemporaryFolder tempFolder = new TemporaryFolder();
 
   private String tablePath;
   private Table table;
@@ -101,7 +104,7 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
 
   @Before
   public void before() throws IOException {
-    File folder = tempFolder.newFolder();
+    File folder = TEMPORARY_FOLDER.newFolder();
     String warehouse = folder.getAbsolutePath();
 
     tablePath = warehouse.concat("/test");
@@ -110,7 +113,7 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
     Map<String, String> props = ImmutableMap.of(TableProperties.DEFAULT_FILE_FORMAT, format.name());
     table = SimpleDataUtil.createTable(tablePath, props, partitioned);
 
-    env = StreamExecutionEnvironment.getExecutionEnvironment()
+    env = StreamExecutionEnvironment.getExecutionEnvironment(MiniClusterResource.DISABLE_CLASSLOADER_CHECK_CONFIG)
         .enableCheckpointing(100)
         .setParallelism(parallelism)
         .setMaxParallelism(parallelism);
@@ -134,7 +137,7 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
         Row.of(3, "foo")
     );
     DataStream<RowData> dataStream = env.addSource(createBoundedSource(rows), ROW_TYPE_INFO)
-        .map(CONVERTER::toInternal, RowDataTypeInfo.of(SimpleDataUtil.ROW_TYPE));
+        .map(CONVERTER::toInternal, FlinkCompatibilityUtil.toTypeInfo(SimpleDataUtil.ROW_TYPE));
 
     FlinkSink.forRowData(dataStream)
         .table(table)
@@ -177,10 +180,8 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
     SimpleDataUtil.assertTableRows(tablePath, convertToRowData(rows));
   }
 
-  private List<Path> partitionFiles(String partition) throws IOException {
-    return Files.list(Paths.get(tablePath, "data", String.format("data=%s", partition)))
-        .filter(p -> !p.toString().endsWith(".crc"))
-        .collect(Collectors.toList());
+  private int partitionFiles(String partition) throws IOException {
+    return SimpleDataUtil.partitionDataFiles(table, ImmutableMap.of("data", partition)).size();
   }
 
   @Test
@@ -203,7 +204,7 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
 
     if (parallelism > 1) {
       if (partitioned) {
-        int files = partitionFiles("aaa").size() + partitionFiles("bbb").size() + partitionFiles("ccc").size();
+        int files = partitionFiles("aaa") + partitionFiles("bbb") + partitionFiles("ccc");
         Assert.assertTrue("Should have more than 3 files in iceberg table.", files > 3);
       }
     }
@@ -232,9 +233,9 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
     testWriteRow(null, null);
 
     if (partitioned) {
-      Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1, partitionFiles("aaa").size());
-      Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1, partitionFiles("bbb").size());
-      Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1, partitionFiles("ccc").size());
+      Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1, partitionFiles("aaa"));
+      Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1, partitionFiles("bbb"));
+      Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1, partitionFiles("ccc"));
     }
   }
 
@@ -242,9 +243,9 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
   public void testPartitionWriteMode() throws Exception {
     testWriteRow(null, DistributionMode.HASH);
     if (partitioned) {
-      Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1, partitionFiles("aaa").size());
-      Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1, partitionFiles("bbb").size());
-      Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1, partitionFiles("ccc").size());
+      Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1, partitionFiles("aaa"));
+      Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1, partitionFiles("bbb"));
+      Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1, partitionFiles("ccc"));
     }
   }
 
@@ -252,9 +253,9 @@ public class TestFlinkIcebergSink extends AbstractTestBase {
   public void testShuffleByPartitionWithSchema() throws Exception {
     testWriteRow(SimpleDataUtil.FLINK_SCHEMA, DistributionMode.HASH);
     if (partitioned) {
-      Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1, partitionFiles("aaa").size());
-      Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1, partitionFiles("bbb").size());
-      Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1, partitionFiles("ccc").size());
+      Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1, partitionFiles("aaa"));
+      Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1, partitionFiles("bbb"));
+      Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1, partitionFiles("ccc"));
     }
   }
 }

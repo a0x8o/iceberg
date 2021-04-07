@@ -25,19 +25,17 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.hadoop.hive.ql.exec.mr.ExecMapper;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
-import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.hive.HiveSchemaUtil;
-import org.apache.iceberg.mr.InputFormatConfig;
 import org.apache.iceberg.mr.TestHelper;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.junit.After;
@@ -154,11 +152,12 @@ public class TestHiveIcebergStorageHandlerWithEngine {
 
   @After
   public void after() throws Exception {
-    shell.closeSession();
-    shell.metastore().reset();
-    // HiveServer2 thread pools are using thread local Hive -> HMSClient objects. These are not cleaned up when the
-    // HiveServer2 is stopped. Only Finalizer closes the HMS connections.
-    System.gc();
+    HiveIcebergStorageHandlerTestUtils.close(shell);
+    // Mixing mr and tez jobs within the same JVM can cause problems. Mr jobs set the ExecMapper status to done=false
+    // at the beginning and to done=true at the end. However, tez jobs also rely on this value to see if they should
+    // proceed, but they do not reset it to done=false at the beginning. Therefore, without calling this after each test
+    // case, any tez job that follows a completed mr job will erroneously read done=true and will not proceed.
+    ExecMapper.setDone(false);
   }
 
   @Test
@@ -307,7 +306,32 @@ public class TestHiveIcebergStorageHandlerWithEngine {
 
     shell.executeStatement(query.toString());
 
-    HiveIcebergTestUtils.validateData(table, new ArrayList<>(HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS), 0);
+    HiveIcebergTestUtils.validateData(table, HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS, 0);
+  }
+
+  @Test
+  public void testInsertSupportedTypes() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+    for (int i = 0; i < SUPPORTED_TYPES.size(); i++) {
+      Type type = SUPPORTED_TYPES.get(i);
+      // TODO: remove this filter when issue #1881 is resolved
+      if (type == Types.UUIDType.get() && fileFormat == FileFormat.PARQUET) {
+        continue;
+      }
+      // TODO: remove this filter when we figure out how we could test binary types
+      if (type.equals(Types.BinaryType.get()) || type.equals(Types.FixedType.ofLength(5))) {
+        continue;
+      }
+      String columnName = type.typeId().toString().toLowerCase() + "_column";
+
+      Schema schema = new Schema(required(1, "id", Types.LongType.get()), required(2, columnName, type));
+      List<Record> expected = TestHelper.generateRandomRecords(schema, 5, 0L);
+
+      Table table = testTables.createTable(shell, type.typeId().toString().toLowerCase() + "_table_" + i,
+          schema, PartitionSpec.unpartitioned(), fileFormat, expected);
+
+      HiveIcebergTestUtils.validateData(table, expected, 0);
+    }
   }
 
   /**
@@ -347,6 +371,69 @@ public class TestHiveIcebergStorageHandlerWithEngine {
     List<Record> records = new ArrayList<>(HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS);
     records.addAll(HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS);
     HiveIcebergTestUtils.validateData(table, records, 0);
+  }
+
+  @Test
+  public void testInsertFromSelectWithProjection() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+
+    Table table = testTables.createTable(shell, "customers", HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA,
+        fileFormat, ImmutableList.of());
+    testTables.createTable(shell, "orders", ORDER_SCHEMA, fileFormat, ORDER_RECORDS);
+
+    shell.executeStatement(
+        "INSERT INTO customers (customer_id, last_name) SELECT distinct(customer_id), 'test' FROM orders");
+
+    List<Record> expected = TestHelper.RecordsBuilder.newInstance(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA)
+        .add(0L, null, "test")
+        .add(1L, null, "test")
+        .build();
+
+    HiveIcebergTestUtils.validateData(table, expected, 0);
+  }
+
+  @Test
+  public void testInsertUsingSourceTableWithSharedColumnsNames() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+
+    List<Record> records = HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS;
+    PartitionSpec spec = PartitionSpec.builderFor(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA)
+        .identity("last_name").build();
+    testTables.createTable(shell, "source_customers", HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA,
+        spec, fileFormat, records);
+    Table table = testTables.createTable(shell, "target_customers",
+        HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, spec, fileFormat, ImmutableList.of());
+
+    // Below select from source table should produce: "hive.io.file.readcolumn.names=customer_id,last_name".
+    // Inserting into the target table should not fail because first_name is not selected from the source table
+    shell.executeStatement("INSERT INTO target_customers SELECT customer_id, 'Sam', last_name FROM source_customers");
+
+    List<Record> expected = Lists.newArrayListWithExpectedSize(records.size());
+    records.forEach(r -> {
+      Record copy = r.copy();
+      copy.setField("first_name", "Sam");
+      expected.add(copy);
+    });
+    HiveIcebergTestUtils.validateData(table, expected, 0);
+  }
+
+  @Test
+  public void testInsertFromJoiningTwoIcebergTables() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+
+    PartitionSpec spec = PartitionSpec.builderFor(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA)
+            .identity("last_name").build();
+    testTables.createTable(shell, "source_customers_1", HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA,
+            spec, fileFormat, HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS);
+    testTables.createTable(shell, "source_customers_2", HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA,
+            spec, fileFormat, HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS);
+    Table table = testTables.createTable(shell, "target_customers",
+            HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, spec, fileFormat, ImmutableList.of());
+
+    shell.executeStatement("INSERT INTO target_customers SELECT a.customer_id, b.first_name, a.last_name FROM " +
+            "source_customers_1 a JOIN source_customers_2 b ON a.last_name = b.last_name");
+
+    HiveIcebergTestUtils.validateData(table, HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS, 0);
   }
 
   @Test
@@ -493,30 +580,86 @@ public class TestHiveIcebergStorageHandlerWithEngine {
         .bucket("customer_id", 3)
         .build();
 
-    TableIdentifier identifier = TableIdentifier.of("default", "partitioned_customers");
+    List<Record> records = TestHelper.generateRandomRecords(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, 4, 0L);
 
-    shell.executeStatement("CREATE EXTERNAL TABLE " + identifier +
-        " STORED BY '" + HiveIcebergStorageHandler.class.getName() + "' " +
-        testTables.locationForCreateTableSQL(identifier) +
-        "TBLPROPERTIES ('" + InputFormatConfig.TABLE_SCHEMA + "'='" +
-        SchemaParser.toJson(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA) + "', " +
-        "'" + InputFormatConfig.PARTITION_SPEC + "'='" +
-        PartitionSpecParser.toJson(spec) + "', " +
-        "'" + InputFormatConfig.WRITE_FILE_FORMAT + "'='" + fileFormat + "')");
+    Table table = testTables.createTable(shell, "partitioned_customers",
+        HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, spec, fileFormat, records);
+
+    HiveIcebergTestUtils.validateData(table, records, 0);
+  }
+
+  @Test
+  public void testIdentityPartitionedWrite() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+
+    PartitionSpec spec = PartitionSpec.builderFor(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA)
+        .identity("customer_id")
+        .build();
 
     List<Record> records = TestHelper.generateRandomRecords(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, 4, 0L);
 
-    StringBuilder query = new StringBuilder().append("INSERT INTO " + identifier + " VALUES ");
-    records.forEach(record -> query.append("(")
-        .append(record.get(0)).append(",'")
-        .append(record.get(1)).append("','")
-        .append(record.get(2)).append("'),"));
-    query.setLength(query.length() - 1);
+    Table table = testTables.createTable(shell, "partitioned_customers",
+        HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, spec, fileFormat, records);
 
-    shell.executeStatement(query.toString());
-
-    Table table = testTables.loadTable(identifier);
     HiveIcebergTestUtils.validateData(table, records, 0);
+  }
+
+  @Test
+  public void testMultilevelIdentityPartitionedWrite() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+
+    PartitionSpec spec = PartitionSpec.builderFor(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA)
+        .identity("customer_id")
+        .identity("last_name")
+        .build();
+
+    List<Record> records = TestHelper.generateRandomRecords(HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, 4, 0L);
+
+    Table table = testTables.createTable(shell, "partitioned_customers",
+        HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA, spec, fileFormat, records);
+
+    HiveIcebergTestUtils.validateData(table, records, 0);
+  }
+
+  @Test
+  public void testMultiTableInsert() throws IOException {
+    Assume.assumeTrue("Tez write is not implemented yet", executionEngine.equals("mr"));
+
+    testTables.createTable(shell, "customers", HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA,
+        fileFormat, HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS);
+
+    Schema target1Schema = new Schema(
+        optional(1, "customer_id", Types.LongType.get()),
+        optional(2, "first_name", Types.StringType.get())
+    );
+
+    Schema target2Schema = new Schema(
+        optional(1, "last_name", Types.StringType.get()),
+        optional(2, "customer_id", Types.LongType.get())
+    );
+
+    List<Record> target1Records = TestHelper.RecordsBuilder.newInstance(target1Schema)
+        .add(0L, "Alice")
+        .add(1L, "Bob")
+        .add(2L, "Trudy")
+        .build();
+
+    List<Record> target2Records = TestHelper.RecordsBuilder.newInstance(target2Schema)
+        .add("Brown", 0L)
+        .add("Green", 1L)
+        .add("Pink", 2L)
+        .build();
+
+    Table target1 = testTables.createTable(shell, "target1", target1Schema, fileFormat, ImmutableList.of());
+    Table target2 = testTables.createTable(shell, "target2", target2Schema, fileFormat, ImmutableList.of());
+
+    shell.executeStatement("FROM customers " +
+            "INSERT INTO target1 SELECT customer_id, first_name " +
+            "INSERT INTO target2 SELECT last_name, customer_id");
+
+    // Check that everything is as expected
+    HiveIcebergTestUtils.validateData(target1, target1Records, 0);
+    HiveIcebergTestUtils.validateData(target2, target2Records, 1);
   }
 
   private void testComplexTypeWrite(Schema schema, List<Record> records) throws IOException {
@@ -527,7 +670,7 @@ public class TestHiveIcebergStorageHandlerWithEngine {
     shell.executeStatement("CREATE TABLE default." + dummyTableName + "(a int)");
     shell.executeStatement("INSERT INTO TABLE default." + dummyTableName + " VALUES(1)");
     records.forEach(r -> shell.executeStatement(insertQueryForComplexType(tableName, dummyTableName, schema, r)));
-    HiveIcebergTestUtils.validateData(table, new ArrayList<>(records), 0);
+    HiveIcebergTestUtils.validateData(table, records, 0);
   }
 
   private String insertQueryForComplexType(String tableName, String dummyTableName, Schema schema, Record record) {

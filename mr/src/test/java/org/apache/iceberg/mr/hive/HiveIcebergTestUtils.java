@@ -29,12 +29,14 @@ import java.nio.file.Paths;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
@@ -128,8 +130,8 @@ public class HiveIcebergTestUtils {
     record.set(9, new byte[]{0, 1, 2});
     record.set(10, ByteBuffer.wrap(new byte[]{0, 1, 2, 3}));
     record.set(11, new BigDecimal("0.0000000013"));
-    record.set(12, "11:33");
-    record.set(13, "73689599-d7fc-4dfb-b94e-106ff20284a5");
+    record.set(12, LocalTime.of(11, 33));
+    record.set(13, UUID.fromString("73689599-d7fc-4dfb-b94e-106ff20284a5"));
 
     return record;
   }
@@ -167,8 +169,8 @@ public class HiveIcebergTestUtils {
         new BytesWritable(record.get(9, byte[].class)),
         new BytesWritable(ByteBuffers.toByteArray(record.get(10, ByteBuffer.class))),
         new HiveDecimalWritable(HiveDecimal.create(record.get(11, BigDecimal.class))),
-        new Text(record.get(12, String.class)),
-        new Text(record.get(13, String.class))
+        new Text(record.get(12, LocalTime.class).toString()),
+        new Text(record.get(13, UUID.class).toString())
     );
   }
 
@@ -211,7 +213,7 @@ public class HiveIcebergTestUtils {
    * Validates whether the table contains the expected records. The results should be sorted by a unique key so we do
    * not end up with flaky tests.
    * @param table The table we should read the records from
-   * @param expected The expected list of Records (The list will be sorted)
+   * @param expected The expected list of Records
    * @param sortBy The column position by which we will sort
    * @throws IOException Exceptions when reading the table data
    */
@@ -229,18 +231,20 @@ public class HiveIcebergTestUtils {
   /**
    * Validates whether the 2 sets of records are the same. The results should be sorted by a unique key so we do
    * not end up with flaky tests.
-   * @param expected The expected list of Records (The list will be sorted)
-   * @param actual The actual list of Records (The list will be sorted)
+   * @param expected The expected list of Records
+   * @param actual The actual list of Records
    * @param sortBy The column position by which we will sort
    */
   public static void validateData(List<Record> expected, List<Record> actual, int sortBy) {
+    List<Record> sortedExpected = new ArrayList<>(expected);
+    List<Record> sortedActual = new ArrayList<>(actual);
     // Sort based on the specified column
-    expected.sort(Comparator.comparingLong(record -> (Long) record.get(sortBy)));
-    actual.sort(Comparator.comparingLong(record -> (Long) record.get(sortBy)));
+    sortedExpected.sort(Comparator.comparingLong(record -> (Long) record.get(sortBy)));
+    sortedActual.sort(Comparator.comparingLong(record -> (Long) record.get(sortBy)));
 
-    Assert.assertEquals(expected.size(), actual.size());
-    for (int i = 0; i < expected.size(); ++i) {
-      assertEquals(expected.get(i), actual.get(i));
+    Assert.assertEquals(sortedExpected.size(), sortedActual.size());
+    for (int i = 0; i < sortedExpected.size(); ++i) {
+      assertEquals(sortedExpected.get(i), sortedActual.get(i));
     }
   }
 
@@ -259,6 +263,7 @@ public class HiveIcebergTestUtils {
         .collect(Collectors.toList());
 
     Assert.assertEquals(dataFileNum, dataFiles.size());
-    Assert.assertFalse(new File(HiveIcebergOutputCommitter.generateJobLocation(conf, jobId)).exists());
+    Assert.assertFalse(
+        new File(HiveIcebergOutputCommitter.generateJobLocation(table.location(), conf, jobId)).exists());
   }
 }

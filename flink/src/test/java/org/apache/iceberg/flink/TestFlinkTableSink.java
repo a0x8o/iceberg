@@ -19,26 +19,21 @@
 
 package org.apache.iceberg.flink;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Expressions;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.iceberg.DistributionMode;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.relocated.com.google.common.base.Joiner;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
@@ -46,12 +41,22 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 @RunWith(Parameterized.class)
 public class TestFlinkTableSink extends FlinkCatalogTestBase {
+
+  @ClassRule
+  public static final MiniClusterWithClientResource MINI_CLUSTER_RESOURCE =
+      MiniClusterResource.createWithClassloaderCheckDisabled();
+
+  @ClassRule
+  public static final TemporaryFolder TEMPORARY_FOLDER = new TemporaryFolder();
+
   private static final String TABLE_NAME = "test_table";
   private TableEnvironment tEnv;
   private Table icebergTable;
@@ -89,7 +94,8 @@ public class TestFlinkTableSink extends FlinkCatalogTestBase {
             .useBlinkPlanner();
         if (isStreamingJob) {
           settingsBuilder.inStreamingMode();
-          StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+          StreamExecutionEnvironment env = StreamExecutionEnvironment
+              .getExecutionEnvironment(MiniClusterResource.DISABLE_CLASSLOADER_CHECK_CONFIG);
           env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
           env.enableCheckpointing(400);
           env.setMaxParallelism(2);
@@ -266,23 +272,12 @@ public class TestFlinkTableSink extends FlinkCatalogTestBase {
     ));
 
     Assert.assertEquals("There should be only 1 data file in partition 'aaa'", 1,
-        partitionFiles(tableName, "aaa").size());
+        SimpleDataUtil.partitionDataFiles(table, ImmutableMap.of("data", "aaa")).size());
     Assert.assertEquals("There should be only 1 data file in partition 'bbb'", 1,
-        partitionFiles(tableName, "bbb").size());
+        SimpleDataUtil.partitionDataFiles(table, ImmutableMap.of("data", "bbb")).size());
     Assert.assertEquals("There should be only 1 data file in partition 'ccc'", 1,
-        partitionFiles(tableName, "ccc").size());
+        SimpleDataUtil.partitionDataFiles(table, ImmutableMap.of("data", "ccc")).size());
 
     sql("DROP TABLE IF EXISTS %s.%s", flinkDatabase, tableName);
-  }
-
-  private List<Path> partitionFiles(String table, String partition) throws IOException {
-    String databasePath = Joiner.on("/").join(baseNamespace.levels()) + "/" + DATABASE;
-    if (!isHadoopCatalog) {
-      databasePath = databasePath + ".db";
-    }
-    Path dir = Paths.get(warehouseRoot(), databasePath, table, "data", String.format("data=%s", partition));
-    return Files.list(dir)
-        .filter(p -> !p.toString().endsWith(".crc"))
-        .collect(Collectors.toList());
   }
 }

@@ -23,18 +23,19 @@ import java.io.Closeable;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AccessDeniedException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.iceberg.BaseMetastoreCatalog;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
@@ -55,7 +56,6 @@ import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
-import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -93,40 +93,6 @@ public class HadoopCatalog extends BaseMetastoreCatalog implements Closeable, Su
   public HadoopCatalog(){
   }
 
-  /**
-   * The constructor of the HadoopCatalog. It uses the passed location as its warehouse directory.
-   *
-   * @deprecated please use the no-arg constructor, setConf and initialize to construct the catalog. Will be removed in
-   * v0.12.0
-   * @param name The catalog name
-   * @param conf The Hadoop configuration
-   * @param warehouseLocation The location used as warehouse directory
-   */
-  @Deprecated
-  public HadoopCatalog(String name, Configuration conf, String warehouseLocation) {
-    this(name, conf, warehouseLocation, Maps.newHashMap());
-  }
-
-  /**
-   * The all-arg constructor of the HadoopCatalog.
-   *
-   * @deprecated please use the no-arg constructor, setConf and initialize to construct the catalog. Will be removed in
-   * v0.12.0
-   * @param name The catalog name
-   * @param conf The Hadoop configuration
-   * @param warehouseLocation The location used as warehouse directory
-   * @param properties catalog properties
-   */
-  @Deprecated
-  public HadoopCatalog(String name, Configuration conf, String warehouseLocation, Map<String, String> properties) {
-    Preconditions.checkArgument(warehouseLocation != null && !warehouseLocation.equals(""),
-        "Cannot instantiate hadoop catalog. No location provided for warehouse");
-    setConf(conf);
-    Map<String, String> props = Maps.newHashMap(properties);
-    props.put(CatalogProperties.WAREHOUSE_LOCATION, warehouseLocation);
-    initialize(name, props);
-  }
-
   @Override
   public void initialize(String name, Map<String, String> properties) {
     String inputWarehouseLocation = properties.get(CatalogProperties.WAREHOUSE_LOCATION);
@@ -145,11 +111,16 @@ public class HadoopCatalog extends BaseMetastoreCatalog implements Closeable, Su
   /**
    * The constructor of the HadoopCatalog. It uses the passed location as its warehouse directory.
    *
+   * @deprecated please use the no-arg constructor, setConf and initialize to construct the catalog. Will be removed in
+   * v0.13.0
+   *
    * @param conf The Hadoop configuration
    * @param warehouseLocation The location used as warehouse directory
    */
+  @Deprecated
   public HadoopCatalog(Configuration conf, String warehouseLocation) {
-    this("hadoop", conf, warehouseLocation);
+    setConf(conf);
+    initialize("hadoop", ImmutableMap.of(CatalogProperties.WAREHOUSE_LOCATION, warehouseLocation));
   }
 
   /**
@@ -157,10 +128,16 @@ public class HadoopCatalog extends BaseMetastoreCatalog implements Closeable, Su
    * from the passed Hadoop configuration as its default file system, and use the default directory
    * <code>iceberg/warehouse</code> as the warehouse directory.
    *
+   * @deprecated please use the no-arg constructor, setConf and initialize to construct the catalog. Will be removed in
+   * v0.13.0
+   *
    * @param conf The Hadoop configuration
    */
+  @Deprecated
   public HadoopCatalog(Configuration conf) {
-    this("hadoop", conf, conf.get("fs.defaultFS") + "/" + ICEBERG_HADOOP_WAREHOUSE_BASE);
+    setConf(conf);
+    String hadoopWarehouseLocation = conf.get("fs.defaultFS") + "/" + ICEBERG_HADOOP_WAREHOUSE_BASE;
+    initialize("hadoop", ImmutableMap.of(CatalogProperties.WAREHOUSE_LOCATION, hadoopWarehouseLocation));
   }
 
   @Override
@@ -170,7 +147,9 @@ public class HadoopCatalog extends BaseMetastoreCatalog implements Closeable, Su
 
   private boolean shouldSuppressPermissionError(IOException ioException) {
     if (suppressPermissionError) {
-      return ioException.getMessage() != null && ioException.getMessage().contains("AuthorizationPermissionMismatch");
+      return ioException instanceof AccessDeniedException ||
+              (ioException.getMessage() != null &&
+                      ioException.getMessage().contains("AuthorizationPermissionMismatch"));
     }
     return false;
   }
@@ -220,14 +199,15 @@ public class HadoopCatalog extends BaseMetastoreCatalog implements Closeable, Su
       if (!isDirectory(nsPath)) {
         throw new NoSuchNamespaceException("Namespace does not exist: %s", namespace);
       }
-
-      for (FileStatus s : fs.listStatus(nsPath)) {
-        if (!s.isDirectory()) {
+      RemoteIterator<FileStatus> it = fs.listStatusIterator(nsPath);
+      while (it.hasNext()) {
+        FileStatus status = it.next();
+        if (!status.isDirectory()) {
           // Ignore the path which is not a directory.
           continue;
         }
 
-        Path path = s.getPath();
+        Path path = status.getPath();
         if (isTableDir(path)) {
           TableIdentifier tblIdent = TableIdentifier.of(namespace, path.getName());
           tblIdents.add(tblIdent);
@@ -329,11 +309,17 @@ public class HadoopCatalog extends BaseMetastoreCatalog implements Closeable, Su
     }
 
     try {
-      return Stream.of(fs.listStatus(nsPath))
-        .map(FileStatus::getPath)
-        .filter(this::isNamespace)
-        .map(path -> append(namespace, path.getName()))
-        .collect(Collectors.toList());
+      // using the iterator listing allows for paged downloads
+      // from HDFS and prefetching from object storage.
+      List<Namespace> namespaces = new ArrayList<>();
+      RemoteIterator<FileStatus> it = fs.listStatusIterator(nsPath);
+      while (it.hasNext()) {
+        Path path = it.next().getPath();
+        if (isNamespace(path)) {
+          namespaces.add(append(namespace, path.getName()));
+        }
+      }
+      return namespaces;
     } catch (IOException ioe) {
       throw new RuntimeIOException(ioe, "Failed to list namespace under: %s", namespace);
     }
