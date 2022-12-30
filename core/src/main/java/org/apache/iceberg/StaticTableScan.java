@@ -16,43 +16,43 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg;
 
 import java.util.function.Function;
-import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.io.CloseableIterable;
 
-class StaticTableScan extends BaseTableScan {
+class StaticTableScan extends BaseMetadataTableScan {
   private final Function<StaticTableScan, DataTask> buildTask;
 
-  StaticTableScan(TableOperations ops, Table table, Schema schema, Function<StaticTableScan, DataTask> buildTask) {
-    super(ops, table, schema);
+  StaticTableScan(
+      TableOperations ops,
+      Table table,
+      Schema schema,
+      MetadataTableType tableType,
+      Function<StaticTableScan, DataTask> buildTask) {
+    super(ops, table, schema, tableType);
     this.buildTask = buildTask;
   }
 
-  private StaticTableScan(TableOperations ops, Table table, Schema schema,
-                          Function<StaticTableScan, DataTask> buildTask, TableScanContext context) {
-    super(ops, table, schema, context);
+  StaticTableScan(
+      TableOperations ops,
+      Table table,
+      Schema schema,
+      MetadataTableType tableType,
+      Function<StaticTableScan, DataTask> buildTask,
+      TableScanContext context) {
+    super(ops, table, schema, tableType, context);
     this.buildTask = buildTask;
   }
 
   @Override
-  public long targetSplitSize() {
-    return tableOps().current().propertyAsLong(
-        TableProperties.METADATA_SPLIT_SIZE, TableProperties.METADATA_SPLIT_SIZE_DEFAULT);
+  protected TableScan newRefinedScan(
+      TableOperations ops, Table table, Schema schema, TableScanContext context) {
+    return new StaticTableScan(ops, table, schema, tableType(), buildTask, context);
   }
 
   @Override
-  protected TableScan newRefinedScan(TableOperations ops, Table table, Schema schema, TableScanContext context) {
-    return new StaticTableScan(
-        ops, table, schema, buildTask, context);
-  }
-
-  @Override
-  protected CloseableIterable<FileScanTask> planFiles(
-      TableOperations ops, Snapshot snapshot, Expression rowFilter,
-      boolean ignoreResiduals, boolean caseSensitive, boolean colStats) {
+  protected CloseableIterable<FileScanTask> doPlanFiles() {
     return CloseableIterable.withNoopClose(buildTask.apply(this));
   }
 }

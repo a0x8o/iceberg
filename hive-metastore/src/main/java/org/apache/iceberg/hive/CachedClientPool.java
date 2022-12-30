@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg.hive;
 
 import com.github.benmanes.caffeine.cache.Cache;
@@ -25,13 +24,14 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
-import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
+import org.apache.hadoop.hive.metastore.IMetaStoreClient;
 import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
 
-public class CachedClientPool implements ClientPool<HiveMetaStoreClient, TException> {
+public class CachedClientPool implements ClientPool<IMetaStoreClient, TException> {
 
   private static Cache<String, HiveClientPool> clientPoolCache;
 
@@ -43,10 +43,14 @@ public class CachedClientPool implements ClientPool<HiveMetaStoreClient, TExcept
   CachedClientPool(Configuration conf, Map<String, String> properties) {
     this.conf = conf;
     this.metastoreUri = conf.get(HiveConf.ConfVars.METASTOREURIS.varname, "");
-    this.clientPoolSize = PropertyUtil.propertyAsInt(properties,
+    this.clientPoolSize =
+        PropertyUtil.propertyAsInt(
+            properties,
             CatalogProperties.CLIENT_POOL_SIZE,
             CatalogProperties.CLIENT_POOL_SIZE_DEFAULT);
-    this.evictionInterval = PropertyUtil.propertyAsLong(properties,
+    this.evictionInterval =
+        PropertyUtil.propertyAsLong(
+            properties,
             CatalogProperties.CLIENT_POOL_CACHE_EVICTION_INTERVAL_MS,
             CatalogProperties.CLIENT_POOL_CACHE_EVICTION_INTERVAL_MS_DEFAULT);
     init();
@@ -57,10 +61,11 @@ public class CachedClientPool implements ClientPool<HiveMetaStoreClient, TExcept
     return clientPoolCache.get(metastoreUri, k -> new HiveClientPool(clientPoolSize, conf));
   }
 
-
   private synchronized void init() {
     if (clientPoolCache == null) {
-      clientPoolCache = Caffeine.newBuilder().expireAfterAccess(evictionInterval, TimeUnit.MILLISECONDS)
+      clientPoolCache =
+          Caffeine.newBuilder()
+              .expireAfterAccess(evictionInterval, TimeUnit.MILLISECONDS)
               .removalListener((key, value, cause) -> ((HiveClientPool) value).close())
               .build();
     }
@@ -72,7 +77,14 @@ public class CachedClientPool implements ClientPool<HiveMetaStoreClient, TExcept
   }
 
   @Override
-  public <R> R run(Action<R, HiveMetaStoreClient, TException> action) throws TException, InterruptedException {
+  public <R> R run(Action<R, IMetaStoreClient, TException> action)
+      throws TException, InterruptedException {
     return clientPool().run(action);
+  }
+
+  @Override
+  public <R> R run(Action<R, IMetaStoreClient, TException> action, boolean retry)
+      throws TException, InterruptedException {
+    return clientPool().run(action, retry);
   }
 }

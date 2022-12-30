@@ -16,20 +16,20 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg;
 
-import java.util.Set;
 import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.util.CharSequenceSet;
 
 class BaseRowDelta extends MergingSnapshotProducer<RowDelta> implements RowDelta {
   private Long startingSnapshotId = null; // check all versions by default
-  private final Set<CharSequence> referencedDataFiles = CharSequenceSet.empty();
+  private final CharSequenceSet referencedDataFiles = CharSequenceSet.empty();
   private boolean validateDeletes = false;
-  private Expression conflictDetectionFilter = null;
-  private boolean caseSensitive = true;
+  private Expression conflictDetectionFilter = Expressions.alwaysTrue();
+  private boolean validateNewDataFiles = false;
+  private boolean validateNewDeleteFiles = false;
 
   BaseRowDelta(String tableName, TableOperations ops) {
     super(tableName, ops);
@@ -64,12 +64,6 @@ class BaseRowDelta extends MergingSnapshotProducer<RowDelta> implements RowDelta
   }
 
   @Override
-  public RowDelta caseSensitive(boolean isCaseSensitive) {
-    this.caseSensitive = isCaseSensitive;
-    return this;
-  }
-
-  @Override
   public RowDelta validateDeletedFiles() {
     this.validateDeletes = true;
     return this;
@@ -82,21 +76,43 @@ class BaseRowDelta extends MergingSnapshotProducer<RowDelta> implements RowDelta
   }
 
   @Override
-  public RowDelta validateNoConflictingAppends(Expression newConflictDetectionFilter) {
-    Preconditions.checkArgument(newConflictDetectionFilter != null, "Conflict detection filter cannot be null");
+  public RowDelta conflictDetectionFilter(Expression newConflictDetectionFilter) {
+    Preconditions.checkArgument(
+        newConflictDetectionFilter != null, "Conflict detection filter cannot be null");
     this.conflictDetectionFilter = newConflictDetectionFilter;
     return this;
   }
 
   @Override
-  protected void validate(TableMetadata base) {
+  public RowDelta validateNoConflictingDataFiles() {
+    this.validateNewDataFiles = true;
+    return this;
+  }
+
+  @Override
+  public RowDelta validateNoConflictingDeleteFiles() {
+    this.validateNewDeleteFiles = true;
+    return this;
+  }
+
+  @Override
+  protected void validate(TableMetadata base, Snapshot snapshot) {
     if (base.currentSnapshot() != null) {
       if (!referencedDataFiles.isEmpty()) {
-        validateDataFilesExist(base, startingSnapshotId, referencedDataFiles, !validateDeletes);
+        validateDataFilesExist(
+            base,
+            startingSnapshotId,
+            referencedDataFiles,
+            !validateDeletes,
+            conflictDetectionFilter);
       }
 
-      if (conflictDetectionFilter != null) {
-        validateAddedDataFiles(base, startingSnapshotId, conflictDetectionFilter, caseSensitive);
+      if (validateNewDataFiles) {
+        validateAddedDataFiles(base, startingSnapshotId, conflictDetectionFilter);
+      }
+
+      if (validateNewDeleteFiles) {
+        validateNoNewDeleteFiles(base, startingSnapshotId, conflictDetectionFilter);
       }
     }
   }

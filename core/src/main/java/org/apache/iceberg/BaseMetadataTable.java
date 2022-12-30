@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg;
 
 import java.io.Serializable;
@@ -25,16 +24,18 @@ import java.util.Map;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.transforms.Transforms;
 
 /**
  * Base class for metadata tables.
- * <p>
- * Serializing and deserializing a metadata table object returns a read only implementation of the metadata table
- * using a {@link StaticTableOperations}. This way no Catalog related calls are needed when reading the table data after
- * deserialization.
+ *
+ * <p>Serializing and deserializing a metadata table object returns a read only implementation of
+ * the metadata table using a {@link StaticTableOperations}. This way no Catalog related calls are
+ * needed when reading the table data after deserialization.
  */
-abstract class BaseMetadataTable implements Table, HasTableOperations, Serializable {
+public abstract class BaseMetadataTable implements Table, HasTableOperations, Serializable {
   private final PartitionSpec spec = PartitionSpec.unpartitioned();
   private final SortOrder sortOrder = SortOrder.unsorted();
   private final TableOperations ops;
@@ -45,6 +46,29 @@ abstract class BaseMetadataTable implements Table, HasTableOperations, Serializa
     this.ops = ops;
     this.table = table;
     this.name = name;
+  }
+
+  /**
+   * This method transforms the table's partition spec to a spec that is used to rewrite the
+   * user-provided filter expression against the given metadata table.
+   *
+   * <p>The resulting partition spec maps partition.X fields to partition X using an identity
+   * partition transform. When this spec is used to project an expression for the given metadata
+   * table, the projection will remove predicates for non-partition fields (not in the spec) and
+   * will remove the "partition." prefix from fields.
+   *
+   * @param metadataTableSchema schema of the metadata table
+   * @param spec spec on which the metadata table schema is based
+   * @return a spec used to rewrite the metadata table filters to partition filters using an
+   *     inclusive projection
+   */
+  static PartitionSpec transformSpec(Schema metadataTableSchema, PartitionSpec spec) {
+    PartitionSpec.Builder identitySpecBuilder =
+        PartitionSpec.builderFor(metadataTableSchema).checkConflicts(false);
+    for (PartitionField field : spec.fields()) {
+      identitySpecBuilder.add(field.fieldId(), field.name(), Transforms.identity());
+    }
+    return identitySpecBuilder.build();
   }
 
   abstract MetadataTableType metadataTableType();
@@ -86,6 +110,11 @@ abstract class BaseMetadataTable implements Table, HasTableOperations, Serializa
   @Override
   public void refresh() {
     table().refresh();
+  }
+
+  @Override
+  public Map<Integer, Schema> schemas() {
+    return ImmutableMap.of(TableMetadata.INITIAL_SCHEMA_ID, schema());
   }
 
   @Override
@@ -131,6 +160,16 @@ abstract class BaseMetadataTable implements Table, HasTableOperations, Serializa
   @Override
   public List<HistoryEntry> history() {
     return table().history();
+  }
+
+  @Override
+  public List<StatisticsFile> statisticsFiles() {
+    return ImmutableList.of();
+  }
+
+  @Override
+  public Map<String, SnapshotRef> refs() {
+    return table().refs();
   }
 
   @Override
@@ -194,13 +233,13 @@ abstract class BaseMetadataTable implements Table, HasTableOperations, Serializa
   }
 
   @Override
-  public ExpireSnapshots expireSnapshots() {
-    throw new UnsupportedOperationException("Cannot expire snapshots from a metadata table");
+  public UpdateStatistics updateStatistics() {
+    throw new UnsupportedOperationException("Cannot update statistics of a metadata table");
   }
 
   @Override
-  public Rollback rollback() {
-    throw new UnsupportedOperationException("Cannot roll back a metadata table");
+  public ExpireSnapshots expireSnapshots() {
+    throw new UnsupportedOperationException("Cannot expire snapshots from a metadata table");
   }
 
   @Override

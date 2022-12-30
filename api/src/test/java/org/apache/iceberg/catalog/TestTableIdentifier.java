@@ -16,9 +16,9 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg.catalog;
 
+import org.assertj.core.api.Assertions;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -44,14 +44,37 @@ public class TestTableIdentifier {
 
   @Test
   public void testToLowerCase() {
+    Assert.assertEquals(TableIdentifier.of("Tbl").toLowerCase(), TableIdentifier.of("tbl"));
     Assert.assertEquals(
-        TableIdentifier.of("Tbl").toLowerCase(),
-        TableIdentifier.of("tbl"));
-    Assert.assertEquals(
-        TableIdentifier.of("dB", "TBL").toLowerCase(),
-        TableIdentifier.of("db", "tbl"));
+        TableIdentifier.of("dB", "TBL").toLowerCase(), TableIdentifier.of("db", "tbl"));
     Assert.assertEquals(
         TableIdentifier.of("Catalog", "dB", "TBL").toLowerCase(),
         TableIdentifier.of("catalog", "db", "tbl"));
+  }
+
+  @Test
+  public void testInvalidTableName() {
+    Assertions.assertThatThrownBy(() -> TableIdentifier.of(Namespace.empty(), ""))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid table name: null or empty");
+
+    Assertions.assertThatThrownBy(() -> TableIdentifier.of(Namespace.empty(), null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid table name: null or empty");
+  }
+
+  @Test
+  public void testNulls() {
+    Assertions.assertThatThrownBy(() -> TableIdentifier.of((String[]) null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot create table identifier from null array");
+
+    Assertions.assertThatThrownBy(() -> TableIdentifier.parse(null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot parse table identifier: null");
+
+    Assertions.assertThatThrownBy(() -> TableIdentifier.of(null, "name"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid Namespace: null");
   }
 }

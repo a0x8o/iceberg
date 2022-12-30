@@ -16,10 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg;
 
 import java.io.Serializable;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Function;
@@ -33,11 +33,12 @@ import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.base.Objects;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.ByteBuffers;
 
 public class GenericManifestFile
     implements ManifestFile, StructLike, IndexedRecord, SchemaConstructable, Serializable {
-  private static final Schema AVRO_SCHEMA = AvroSchemaUtil.convert(
-      ManifestFile.schema(), "manifest_file");
+  private static final Schema AVRO_SCHEMA =
+      AvroSchemaUtil.convert(ManifestFile.schema(), "manifest_file");
 
   private transient Schema avroSchema; // not final for Java serialization
   private int[] fromProjectionPos;
@@ -58,11 +59,10 @@ public class GenericManifestFile
   private Long existingRowsCount = null;
   private Long deletedRowsCount = null;
   private PartitionFieldSummary[] partitions = null;
+  private byte[] keyMetadata = null;
 
-  /**
-   * Used by Avro reflection to instantiate this class when reading manifest files.
-   */
-  public GenericManifestFile(org.apache.avro.Schema avroSchema) {
+  /** Used by Avro reflection to instantiate this class when reading manifest files. */
+  public GenericManifestFile(Schema avroSchema) {
     this.avroSchema = avroSchema;
 
     List<Types.NestedField> fields = AvroSchemaUtil.convert(avroSchema).asStructType().fields();
@@ -101,13 +101,25 @@ public class GenericManifestFile
     this.deletedRowsCount = null;
     this.partitions = null;
     this.fromProjectionPos = null;
+    this.keyMetadata = null;
   }
 
-  public GenericManifestFile(String path, long length, int specId, ManifestContent content,
-                             long sequenceNumber, long minSequenceNumber, Long snapshotId,
-                             int addedFilesCount, long addedRowsCount, int existingFilesCount,
-                             long existingRowsCount, int deletedFilesCount, long deletedRowsCount,
-                             List<PartitionFieldSummary> partitions) {
+  public GenericManifestFile(
+      String path,
+      long length,
+      int specId,
+      ManifestContent content,
+      long sequenceNumber,
+      long minSequenceNumber,
+      Long snapshotId,
+      int addedFilesCount,
+      long addedRowsCount,
+      int existingFilesCount,
+      long existingRowsCount,
+      int deletedFilesCount,
+      long deletedRowsCount,
+      List<PartitionFieldSummary> partitions,
+      ByteBuffer keyMetadata) {
     this.avroSchema = AVRO_SCHEMA;
     this.manifestPath = path;
     this.length = length;
@@ -124,6 +136,7 @@ public class GenericManifestFile
     this.deletedRowsCount = deletedRowsCount;
     this.partitions = partitions == null ? null : partitions.toArray(new PartitionFieldSummary[0]);
     this.fromProjectionPos = null;
+    this.keyMetadata = ByteBuffers.toByteArray(keyMetadata);
   }
 
   /**
@@ -147,20 +160,22 @@ public class GenericManifestFile
     this.deletedFilesCount = toCopy.deletedFilesCount;
     this.deletedRowsCount = toCopy.deletedRowsCount;
     if (toCopy.partitions != null) {
-      this.partitions = Stream.of(toCopy.partitions)
-          .map(PartitionFieldSummary::copy)
-          .toArray(PartitionFieldSummary[]::new);
+      this.partitions =
+          Stream.of(toCopy.partitions)
+              .map(PartitionFieldSummary::copy)
+              .toArray(PartitionFieldSummary[]::new);
     } else {
       this.partitions = null;
     }
     this.fromProjectionPos = toCopy.fromProjectionPos;
+    this.keyMetadata =
+        toCopy.keyMetadata == null
+            ? null
+            : Arrays.copyOf(toCopy.keyMetadata, toCopy.keyMetadata.length);
   }
 
-  /**
-   * Constructor for Java serialization.
-   */
-  GenericManifestFile() {
-  }
+  /** Constructor for Java serialization. */
+  GenericManifestFile() {}
 
   @Override
   public String path() {
@@ -246,6 +261,11 @@ public class GenericManifestFile
   }
 
   @Override
+  public ByteBuffer keyMetadata() {
+    return keyMetadata == null ? null : ByteBuffer.wrap(keyMetadata);
+  }
+
+  @Override
   public int size() {
     return ManifestFile.schema().columns().size();
   }
@@ -291,6 +311,8 @@ public class GenericManifestFile
         return deletedRowsCount;
       case 13:
         return partitions();
+      case 14:
+        return keyMetadata();
       default:
         throw new UnsupportedOperationException("Unknown field ordinal: " + pos);
     }
@@ -316,7 +338,8 @@ public class GenericManifestFile
         this.specId = (Integer) value;
         return;
       case 3:
-        this.content = value != null ? ManifestContent.values()[(Integer) value] : ManifestContent.DATA;
+        this.content =
+            value != null ? ManifestContent.values()[(Integer) value] : ManifestContent.DATA;
         return;
       case 4:
         this.sequenceNumber = value != null ? (Long) value : 0;
@@ -346,8 +369,13 @@ public class GenericManifestFile
         this.deletedRowsCount = (Long) value;
         return;
       case 13:
-        this.partitions = value == null ? null :
-            ((List<PartitionFieldSummary>) value).toArray(new PartitionFieldSummary[0]);
+        this.partitions =
+            value == null
+                ? null
+                : ((List<PartitionFieldSummary>) value).toArray(new PartitionFieldSummary[0]);
+        return;
+      case 14:
+        this.keyMetadata = ByteBuffers.toByteArray((ByteBuffer) value);
         return;
       default:
         // ignore the object, it must be from a newer version of the format
@@ -388,6 +416,7 @@ public class GenericManifestFile
   @Override
   public String toString() {
     return MoreObjects.toStringHelper(this)
+        .add("content", content)
         .add("path", manifestPath)
         .add("length", length)
         .add("partition_spec_id", specId)
@@ -399,6 +428,9 @@ public class GenericManifestFile
         .add("deleted_data_files_count", deletedFilesCount)
         .add("deleted_rows_count", deletedRowsCount)
         .add("partitions", partitions)
+        .add("key_metadata", keyMetadata == null ? "null" : "(redacted)")
+        .add("sequence_number", sequenceNumber)
+        .add("min_sequence_number", minSequenceNumber)
         .toString();
   }
 
@@ -413,12 +445,23 @@ public class GenericManifestFile
       if (toCopy instanceof GenericManifestFile) {
         this.manifestFile = new GenericManifestFile((GenericManifestFile) toCopy);
       } else {
-        this.manifestFile = new GenericManifestFile(
-            toCopy.path(), toCopy.length(), toCopy.partitionSpecId(), toCopy.content(),
-            toCopy.sequenceNumber(), toCopy.minSequenceNumber(), toCopy.snapshotId(),
-            toCopy.addedFilesCount(), toCopy.addedRowsCount(), toCopy.existingFilesCount(),
-            toCopy.existingRowsCount(), toCopy.deletedFilesCount(), toCopy.deletedRowsCount(),
-            copyList(toCopy.partitions(), PartitionFieldSummary::copy));
+        this.manifestFile =
+            new GenericManifestFile(
+                toCopy.path(),
+                toCopy.length(),
+                toCopy.partitionSpecId(),
+                toCopy.content(),
+                toCopy.sequenceNumber(),
+                toCopy.minSequenceNumber(),
+                toCopy.snapshotId(),
+                toCopy.addedFilesCount(),
+                toCopy.addedRowsCount(),
+                toCopy.existingFilesCount(),
+                toCopy.existingRowsCount(),
+                toCopy.deletedFilesCount(),
+                toCopy.deletedRowsCount(),
+                copyList(toCopy.partitions(), PartitionFieldSummary::copy),
+                toCopy.keyMetadata());
       }
     }
 

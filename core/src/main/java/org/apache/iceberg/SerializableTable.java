@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg;
 
 import java.io.Serializable;
@@ -24,28 +23,30 @@ import java.util.List;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.encryption.EncryptionManager;
-import org.apache.iceberg.hadoop.HadoopFileIO;
+import org.apache.iceberg.hadoop.HadoopConfigurable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.SerializableMap;
+import org.apache.iceberg.util.SerializableSupplier;
 
 /**
  * A read-only serializable table that can be sent to other nodes in a cluster.
- * <p>
- * An instance of this class represents an immutable serializable copy of a table state and
- * will not reflect any subsequent changed made to the original table.
- * <p>
- * While this class captures the metadata file location that can be used to load the complete
- * table metadata, it directly persists the current schema, spec, sort order, table properties
- * to avoid reading the metadata file from other nodes for frequently needed metadata.
- * <p>
- * The implementation assumes the passed instances of {@link FileIO}, {@link EncryptionManager},
+ *
+ * <p>An instance of this class represents an immutable serializable copy of a table state and will
+ * not reflect any subsequent changed made to the original table.
+ *
+ * <p>While this class captures the metadata file location that can be used to load the complete
+ * table metadata, it directly persists the current schema, spec, sort order, table properties to
+ * avoid reading the metadata file from other nodes for frequently needed metadata.
+ *
+ * <p>The implementation assumes the passed instances of {@link FileIO}, {@link EncryptionManager},
  * {@link LocationProvider} are serializable. If you are serializing the table using a custom
  * serialization framework like Kryo, those instances of {@link FileIO}, {@link EncryptionManager},
  * {@link LocationProvider} must be supported by that particular serialization framework.
- * <p>
- * <em>Note:</em> loading the complete metadata from a large number of nodes can overwhelm the storage.
+ *
+ * <p><em>Note:</em> loading the complete metadata from a large number of nodes can overwhelm the
+ * storage.
  */
 public class SerializableTable implements Table, Serializable {
 
@@ -54,28 +55,34 @@ public class SerializableTable implements Table, Serializable {
   private final String metadataFileLocation;
   private final Map<String, String> properties;
   private final String schemaAsJson;
-  private final String specAsJson;
+  private final int defaultSpecId;
+  private final Map<Integer, String> specAsJsonMap;
   private final String sortOrderAsJson;
   private final FileIO io;
   private final EncryptionManager encryption;
   private final LocationProvider locationProvider;
+  private final Map<String, SnapshotRef> refs;
 
   private transient volatile Table lazyTable = null;
   private transient volatile Schema lazySchema = null;
-  private transient volatile PartitionSpec lazySpec = null;
+  private transient volatile Map<Integer, PartitionSpec> lazySpecs = null;
   private transient volatile SortOrder lazySortOrder = null;
 
-  private SerializableTable(Table table) {
+  protected SerializableTable(Table table) {
     this.name = table.name();
     this.location = table.location();
     this.metadataFileLocation = metadataFileLocation(table);
     this.properties = SerializableMap.copyOf(table.properties());
     this.schemaAsJson = SchemaParser.toJson(table.schema());
-    this.specAsJson = PartitionSpecParser.toJson(table.spec());
+    this.defaultSpecId = table.spec().specId();
+    this.specAsJsonMap = Maps.newHashMap();
+    Map<Integer, PartitionSpec> specs = table.specs();
+    specs.forEach((specId, spec) -> specAsJsonMap.put(specId, PartitionSpecParser.toJson(spec)));
     this.sortOrderAsJson = SortOrderParser.toJson(table.sortOrder());
     this.io = fileIO(table);
     this.encryption = table.encryption();
     this.locationProvider = table.locationProvider();
+    this.refs = SerializableMap.copyOf(table.refs());
   }
 
   /**
@@ -102,13 +109,11 @@ public class SerializableTable implements Table, Serializable {
   }
 
   private FileIO fileIO(Table table) {
-    if (table.io() instanceof HadoopFileIO) {
-      HadoopFileIO hadoopFileIO = (HadoopFileIO) table.io();
-      SerializableConfiguration serializedConf = new SerializableConfiguration(hadoopFileIO.getConf());
-      return new HadoopFileIO(serializedConf::get);
-    } else {
-      return table.io();
+    if (table.io() instanceof HadoopConfigurable) {
+      ((HadoopConfigurable) table.io()).serializeConfWith(SerializableConfSupplier::new);
     }
+
+    return table.io();
   }
 
   private Table lazyTable() {
@@ -116,10 +121,12 @@ public class SerializableTable implements Table, Serializable {
       synchronized (this) {
         if (lazyTable == null) {
           if (metadataFileLocation == null) {
-            throw new UnsupportedOperationException("Cannot load metadata: metadata file location is null");
+            throw new UnsupportedOperationException(
+                "Cannot load metadata: metadata file location is null");
           }
 
-          TableOperations ops = new StaticTableOperations(metadataFileLocation, io, locationProvider);
+          TableOperations ops =
+              new StaticTableOperations(metadataFileLocation, io, locationProvider);
           this.lazyTable = newTable(ops, name);
         }
       }
@@ -164,24 +171,34 @@ public class SerializableTable implements Table, Serializable {
   }
 
   @Override
-  public PartitionSpec spec() {
-    if (lazySpec == null) {
-      synchronized (this) {
-        if (lazySpec == null && lazyTable == null) {
-          // prefer parsing JSON as opposed to loading the metadata
-          this.lazySpec = PartitionSpecParser.fromJson(schema(), specAsJson);
-        } else if (lazySpec == null) {
-          this.lazySpec = lazyTable.spec();
-        }
-      }
-    }
+  public Map<Integer, Schema> schemas() {
+    return lazyTable().schemas();
+  }
 
-    return lazySpec;
+  @Override
+  public PartitionSpec spec() {
+    return specs().get(defaultSpecId);
   }
 
   @Override
   public Map<Integer, PartitionSpec> specs() {
-    return lazyTable().specs();
+    if (lazySpecs == null) {
+      synchronized (this) {
+        if (lazySpecs == null && lazyTable == null) {
+          // prefer parsing JSON as opposed to loading the metadata
+          Map<Integer, PartitionSpec> specs = Maps.newHashMapWithExpectedSize(specAsJsonMap.size());
+          specAsJsonMap.forEach(
+              (specId, specAsJson) -> {
+                specs.put(specId, PartitionSpecParser.fromJson(schema(), specAsJson));
+              });
+          this.lazySpecs = specs;
+        } else if (lazySpecs == null) {
+          this.lazySpecs = lazyTable.specs();
+        }
+      }
+    }
+
+    return lazySpecs;
   }
 
   @Override
@@ -218,6 +235,16 @@ public class SerializableTable implements Table, Serializable {
   @Override
   public LocationProvider locationProvider() {
     return locationProvider;
+  }
+
+  @Override
+  public List<StatisticsFile> statisticsFiles() {
+    return lazyTable().statisticsFiles();
+  }
+
+  @Override
+  public Map<String, SnapshotRef> refs() {
+    return refs;
   }
 
   @Override
@@ -311,13 +338,13 @@ public class SerializableTable implements Table, Serializable {
   }
 
   @Override
-  public ExpireSnapshots expireSnapshots() {
-    throw new UnsupportedOperationException(errorMsg("expireSnapshots"));
+  public UpdateStatistics updateStatistics() {
+    throw new UnsupportedOperationException(errorMsg("updateStatistics"));
   }
 
   @Override
-  public Rollback rollback() {
-    throw new UnsupportedOperationException(errorMsg("rollback"));
+  public ExpireSnapshots expireSnapshots() {
+    throw new UnsupportedOperationException(errorMsg("expireSnapshots"));
   }
 
   @Override
@@ -334,11 +361,11 @@ public class SerializableTable implements Table, Serializable {
     return String.format("Operation %s is not supported after the table is serialized", operation);
   }
 
-  private static class SerializableMetadataTable extends SerializableTable {
+  public static class SerializableMetadataTable extends SerializableTable {
     private final MetadataTableType type;
     private final String baseTableName;
 
-    SerializableMetadataTable(BaseMetadataTable metadataTable) {
+    protected SerializableMetadataTable(BaseMetadataTable metadataTable) {
       super(metadataTable);
       this.type = metadataTable.metadataTableType();
       this.baseTableName = metadataTable.table().name();
@@ -351,16 +378,17 @@ public class SerializableTable implements Table, Serializable {
   }
 
   // captures the current state of a Hadoop configuration in a serializable manner
-  private static class SerializableConfiguration implements Serializable {
+  private static class SerializableConfSupplier implements SerializableSupplier<Configuration> {
 
     private final Map<String, String> confAsMap;
     private transient volatile Configuration conf = null;
 
-    SerializableConfiguration(Configuration conf) {
+    SerializableConfSupplier(Configuration conf) {
       this.confAsMap = Maps.newHashMapWithExpectedSize(conf.size());
       conf.forEach(entry -> confAsMap.put(entry.getKey(), entry.getValue()));
     }
 
+    @Override
     public Configuration get() {
       if (conf == null) {
         synchronized (this) {

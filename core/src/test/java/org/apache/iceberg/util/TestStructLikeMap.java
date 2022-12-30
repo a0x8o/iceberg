@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg.util;
 
 import java.util.Collection;
@@ -33,10 +32,10 @@ import org.junit.Assert;
 import org.junit.Test;
 
 public class TestStructLikeMap {
-  private static final Types.StructType STRUCT_TYPE = Types.StructType.of(
-      Types.NestedField.required(1, "id", Types.IntegerType.get()),
-      Types.NestedField.optional(2, "data", Types.LongType.get())
-  );
+  private static final Types.StructType STRUCT_TYPE =
+      Types.StructType.of(
+          Types.NestedField.required(1, "id", Types.IntegerType.get()),
+          Types.NestedField.optional(2, "data", Types.LongType.get()));
 
   @Test
   public void testSingleRecord() {
@@ -128,5 +127,41 @@ public class TestStructLikeMap {
 
     map.put(record, "1-aaa");
     Assert.assertEquals("1-aaa", map.get(record));
+  }
+
+  @Test
+  public void testNullKeys() {
+    Map<StructLike, String> map = StructLikeMap.create(STRUCT_TYPE);
+    Assert.assertFalse(map.containsKey(null));
+
+    map.put(null, "aaa");
+    Assert.assertTrue(map.containsKey(null));
+    Assert.assertEquals("aaa", map.get(null));
+
+    String replacedValue = map.put(null, "bbb");
+    Assert.assertEquals("aaa", replacedValue);
+
+    String removedValue = map.remove(null);
+    Assert.assertEquals("bbb", removedValue);
+  }
+
+  @Test
+  public void testKeysWithNulls() {
+    Record recordTemplate = GenericRecord.create(STRUCT_TYPE);
+    Record record1 = recordTemplate.copy("id", 1, "data", null);
+    Record record2 = recordTemplate.copy("id", 2, "data", null);
+
+    Map<StructLike, String> map = StructLikeMap.create(STRUCT_TYPE);
+    map.put(record1, "aaa");
+    map.put(record2, "bbb");
+
+    Assert.assertEquals("aaa", map.get(record1));
+    Assert.assertEquals("bbb", map.get(record2));
+
+    Record record3 = record1.copy();
+    Assert.assertTrue(map.containsKey(record3));
+    Assert.assertEquals("aaa", map.get(record3));
+
+    Assert.assertEquals("aaa", map.remove(record3));
   }
 }

@@ -16,10 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg.deletes;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import org.apache.iceberg.DeleteFile;
@@ -29,10 +27,12 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.encryption.EncryptionKeyMetadata;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileAppender;
+import org.apache.iceberg.io.FileWriter;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 
-public class EqualityDeleteWriter<T> implements Closeable {
+public class EqualityDeleteWriter<T> implements FileWriter<T, DeleteWriteResult> {
   private final FileAppender<T> appender;
   private final FileFormat format;
   private final String location;
@@ -43,9 +43,15 @@ public class EqualityDeleteWriter<T> implements Closeable {
   private final SortOrder sortOrder;
   private DeleteFile deleteFile = null;
 
-  public EqualityDeleteWriter(FileAppender<T> appender, FileFormat format, String location,
-                              PartitionSpec spec, StructLike partition, EncryptionKeyMetadata keyMetadata,
-                              SortOrder sortOrder, int... equalityFieldIds) {
+  public EqualityDeleteWriter(
+      FileAppender<T> appender,
+      FileFormat format,
+      String location,
+      PartitionSpec spec,
+      StructLike partition,
+      EncryptionKeyMetadata keyMetadata,
+      SortOrder sortOrder,
+      int... equalityFieldIds) {
     this.appender = appender;
     this.format = format;
     this.location = location;
@@ -56,14 +62,12 @@ public class EqualityDeleteWriter<T> implements Closeable {
     this.equalityFieldIds = equalityFieldIds;
   }
 
-  public void deleteAll(Iterable<T> rows) {
-    appender.addAll(rows);
-  }
-
-  public void delete(T row) {
+  @Override
+  public void write(T row) {
     appender.add(row);
   }
 
+  @Override
   public long length() {
     return appender.length();
   }
@@ -72,21 +76,27 @@ public class EqualityDeleteWriter<T> implements Closeable {
   public void close() throws IOException {
     if (deleteFile == null) {
       appender.close();
-      this.deleteFile = FileMetadata.deleteFileBuilder(spec)
-          .ofEqualityDeletes(equalityFieldIds)
-          .withFormat(format)
-          .withPath(location)
-          .withPartition(partition)
-          .withEncryptionKeyMetadata(keyMetadata)
-          .withFileSizeInBytes(appender.length())
-          .withMetrics(appender.metrics())
-          .withSortOrder(sortOrder)
-          .build();
+      this.deleteFile =
+          FileMetadata.deleteFileBuilder(spec)
+              .ofEqualityDeletes(equalityFieldIds)
+              .withFormat(format)
+              .withPath(location)
+              .withPartition(partition)
+              .withEncryptionKeyMetadata(keyMetadata)
+              .withFileSizeInBytes(appender.length())
+              .withMetrics(appender.metrics())
+              .withSortOrder(sortOrder)
+              .build();
     }
   }
 
   public DeleteFile toDeleteFile() {
     Preconditions.checkState(deleteFile != null, "Cannot create delete file from unclosed writer");
     return deleteFile;
+  }
+
+  @Override
+  public DeleteWriteResult result() {
+    return new DeleteWriteResult(toDeleteFile());
   }
 }

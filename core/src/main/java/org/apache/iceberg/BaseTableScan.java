@@ -16,95 +16,78 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg;
 
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
-import java.util.Collection;
-import java.util.Collections;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.stream.Collectors;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.events.ScanEvent;
-import org.apache.iceberg.expressions.Binder;
-import org.apache.iceberg.expressions.Expression;
-import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.expressions.ExpressionUtil;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.metrics.DefaultMetricsContext;
+import org.apache.iceberg.metrics.ImmutableScanReport;
+import org.apache.iceberg.metrics.ScanMetrics;
+import org.apache.iceberg.metrics.ScanMetricsResult;
+import org.apache.iceberg.metrics.ScanReport;
+import org.apache.iceberg.metrics.Timer;
 import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
-import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.types.TypeUtil;
+import org.apache.iceberg.util.DateTimeUtil;
+import org.apache.iceberg.util.SnapshotUtil;
 import org.apache.iceberg.util.TableScanUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * Base class for {@link TableScan} implementations.
- */
-abstract class BaseTableScan implements TableScan {
+/** Base class for {@link TableScan} implementations. */
+abstract class BaseTableScan extends BaseScan<TableScan, FileScanTask, CombinedScanTask>
+    implements TableScan {
   private static final Logger LOG = LoggerFactory.getLogger(BaseTableScan.class);
-
-  private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
-
-  private final TableOperations ops;
-  private final Table table;
-  private final Schema schema;
-  private final TableScanContext context;
+  private ScanMetrics scanMetrics;
 
   protected BaseTableScan(TableOperations ops, Table table, Schema schema) {
     this(ops, table, schema, new TableScanContext());
   }
 
-  protected BaseTableScan(TableOperations ops, Table table, Schema schema, TableScanContext context) {
-    this.ops = ops;
-    this.table = table;
-    this.schema = schema;
-    this.context = context;
-  }
-
-  protected TableOperations tableOps() {
-    return ops;
+  protected BaseTableScan(
+      TableOperations ops, Table table, Schema schema, TableScanContext context) {
+    super(ops, table, schema, context);
   }
 
   protected Long snapshotId() {
-    return context.snapshotId();
+    return context().snapshotId();
   }
 
+  /**
+   * @return whether column stats are returned.
+   * @deprecated Will be removed in 1.2.0, use {@link TableScanContext#returnColumnStats()}
+   *     directly.
+   */
+  @Deprecated
   protected boolean colStats() {
-    return context.returnColumnStats();
-  }
-
-  protected boolean shouldIgnoreResiduals() {
-    return context.ignoreResiduals();
-  }
-
-  protected Collection<String> selectedColumns() {
-    return context.selectedColumns();
+    return context().returnColumnStats();
   }
 
   protected Map<String, String> options() {
-    return context.options();
+    return context().options();
   }
 
-  protected  TableScanContext context() {
-    return context;
+  protected abstract CloseableIterable<FileScanTask> doPlanFiles();
+
+  protected ScanMetrics scanMetrics() {
+    if (scanMetrics == null) {
+      this.scanMetrics = ScanMetrics.of(new DefaultMetricsContext());
+    }
+
+    return scanMetrics;
   }
-
-  @SuppressWarnings("checkstyle:HiddenField")
-  protected abstract TableScan newRefinedScan(
-      TableOperations ops, Table table, Schema schema, TableScanContext context);
-
-  @SuppressWarnings("checkstyle:HiddenField")
-  protected abstract CloseableIterable<FileScanTask> planFiles(
-      TableOperations ops, Snapshot snapshot, Expression rowFilter,
-      boolean ignoreResiduals, boolean caseSensitive, boolean colStats);
 
   @Override
   public Table table() {
-    return table;
+    return super.table();
   }
 
   @Override
@@ -119,193 +102,101 @@ abstract class BaseTableScan implements TableScan {
 
   @Override
   public TableScan useSnapshot(long scanSnapshotId) {
-    Preconditions.checkArgument(context.snapshotId() == null,
-        "Cannot override snapshot, already set to id=%s", context.snapshotId());
-    Preconditions.checkArgument(ops.current().snapshot(scanSnapshotId) != null,
-        "Cannot find snapshot with ID %s", scanSnapshotId);
+    Preconditions.checkArgument(
+        snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
+    Preconditions.checkArgument(
+        tableOps().current().snapshot(scanSnapshotId) != null,
+        "Cannot find snapshot with ID %s",
+        scanSnapshotId);
     return newRefinedScan(
-        ops, table, schema, context.useSnapshotId(scanSnapshotId));
+        tableOps(), table(), tableSchema(), context().useSnapshotId(scanSnapshotId));
+  }
+
+  @Override
+  public TableScan useRef(String name) {
+    Preconditions.checkArgument(
+        snapshotId() == null, "Cannot override ref, already set snapshot id=%s", snapshotId());
+    Snapshot snapshot = table().snapshot(name);
+    Preconditions.checkArgument(snapshot != null, "Cannot find ref %s", name);
+    return newRefinedScan(
+        tableOps(), table(), tableSchema(), context().useSnapshotId(snapshot.snapshotId()));
   }
 
   @Override
   public TableScan asOfTime(long timestampMillis) {
-    Preconditions.checkArgument(context.snapshotId() == null,
-        "Cannot override snapshot, already set to id=%s", context.snapshotId());
+    Preconditions.checkArgument(
+        snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
 
-    Long lastSnapshotId = null;
-    for (HistoryEntry logEntry : ops.current().snapshotLog()) {
-      if (logEntry.timestampMillis() <= timestampMillis) {
-        lastSnapshotId = logEntry.snapshotId();
-      }
-    }
-
-    // the snapshot ID could be null if no entries were older than the requested time. in that case,
-    // there is no valid snapshot to read.
-    Preconditions.checkArgument(lastSnapshotId != null,
-        "Cannot find a snapshot older than %s", formatTimestampMillis(timestampMillis));
-
-    return useSnapshot(lastSnapshotId);
-  }
-
-  @Override
-  public TableScan option(String property, String value) {
-    return newRefinedScan(
-        ops, table, schema, context.withOption(property, value));
-  }
-
-  @Override
-  public TableScan project(Schema projectedSchema) {
-    return newRefinedScan(
-        ops, table, schema, context.project(projectedSchema));
-  }
-
-  @Override
-  public TableScan caseSensitive(boolean scanCaseSensitive) {
-    return newRefinedScan(
-        ops, table, schema, context.setCaseSensitive(scanCaseSensitive));
-  }
-
-  @Override
-  public TableScan includeColumnStats() {
-    return newRefinedScan(
-        ops, table, schema, context.shouldReturnColumnStats(true));
-  }
-
-  @Override
-  public TableScan select(Collection<String> columns) {
-    return newRefinedScan(
-        ops, table, schema, context.selectColumns(columns));
-  }
-
-  @Override
-  public TableScan filter(Expression expr) {
-    return newRefinedScan(ops, table, schema,
-        context.filterRows(Expressions.and(context.rowFilter(), expr)));
-  }
-
-  @Override
-  public Expression filter() {
-    return context.rowFilter();
-  }
-
-  @Override
-  public TableScan ignoreResiduals() {
-    return newRefinedScan(
-        ops, table, schema, context.ignoreResiduals(true));
+    return useSnapshot(SnapshotUtil.snapshotIdAsOfTime(table(), timestampMillis));
   }
 
   @Override
   public CloseableIterable<FileScanTask> planFiles() {
     Snapshot snapshot = snapshot();
     if (snapshot != null) {
-      LOG.info("Scanning table {} snapshot {} created at {} with filter {}", table,
-          snapshot.snapshotId(), formatTimestampMillis(snapshot.timestampMillis()),
-          context.rowFilter());
+      LOG.info(
+          "Scanning table {} snapshot {} created at {} with filter {}",
+          table(),
+          snapshot.snapshotId(),
+          DateTimeUtil.formatTimestampMillis(snapshot.timestampMillis()),
+          ExpressionUtil.toSanitizedString(filter()));
 
-      Listeners.notifyAll(
-          new ScanEvent(table.name(), snapshot.snapshotId(), context.rowFilter(), schema()));
+      Listeners.notifyAll(new ScanEvent(table().name(), snapshot.snapshotId(), filter(), schema()));
+      List<Integer> projectedFieldIds = Lists.newArrayList(TypeUtil.getProjectedIds(schema()));
+      List<String> projectedFieldNames =
+          projectedFieldIds.stream().map(schema()::findColumnName).collect(Collectors.toList());
 
-      return planFiles(ops, snapshot,
-          context.rowFilter(), context.ignoreResiduals(), context.caseSensitive(), context.returnColumnStats());
+      Timer.Timed planningDuration = scanMetrics().totalPlanningDuration().start();
 
+      return CloseableIterable.whenComplete(
+          doPlanFiles(),
+          () -> {
+            planningDuration.stop();
+            Map<String, String> metadata = Maps.newHashMap(context().options());
+            metadata.putAll(EnvironmentContext.get());
+            ScanReport scanReport =
+                ImmutableScanReport.builder()
+                    .schemaId(schema().schemaId())
+                    .projectedFieldIds(projectedFieldIds)
+                    .projectedFieldNames(projectedFieldNames)
+                    .tableName(table().name())
+                    .snapshotId(snapshot.snapshotId())
+                    .filter(ExpressionUtil.sanitize(filter()))
+                    .scanMetrics(ScanMetricsResult.fromScanMetrics(scanMetrics()))
+                    .metadata(metadata)
+                    .build();
+            context().metricsReporter().report(scanReport);
+          });
     } else {
-      LOG.info("Scanning empty table {}", table);
+      LOG.info("Scanning empty table {}", table());
       return CloseableIterable.empty();
     }
   }
 
   @Override
   public CloseableIterable<CombinedScanTask> planTasks() {
-    Map<String, String> options = context.options();
-    long splitSize;
-    if (options.containsKey(TableProperties.SPLIT_SIZE)) {
-      splitSize = Long.parseLong(options.get(TableProperties.SPLIT_SIZE));
-    } else {
-      splitSize = targetSplitSize();
-    }
-    int lookback;
-    if (options.containsKey(TableProperties.SPLIT_LOOKBACK)) {
-      lookback = Integer.parseInt(options.get(TableProperties.SPLIT_LOOKBACK));
-    } else {
-      lookback = ops.current().propertyAsInt(
-          TableProperties.SPLIT_LOOKBACK, TableProperties.SPLIT_LOOKBACK_DEFAULT);
-    }
-    long openFileCost;
-    if (options.containsKey(TableProperties.SPLIT_OPEN_FILE_COST)) {
-      openFileCost = Long.parseLong(options.get(TableProperties.SPLIT_OPEN_FILE_COST));
-    } else {
-      openFileCost = ops.current().propertyAsLong(
-          TableProperties.SPLIT_OPEN_FILE_COST, TableProperties.SPLIT_OPEN_FILE_COST_DEFAULT);
-    }
-
     CloseableIterable<FileScanTask> fileScanTasks = planFiles();
-    CloseableIterable<FileScanTask> splitFiles = TableScanUtil.splitFiles(fileScanTasks, splitSize);
-    return TableScanUtil.planTasks(splitFiles, splitSize, lookback, openFileCost);
-  }
-
-  @Override
-  public Schema schema() {
-    return lazyColumnProjection();
+    CloseableIterable<FileScanTask> splitFiles =
+        TableScanUtil.splitFiles(fileScanTasks, targetSplitSize());
+    return TableScanUtil.planTasks(
+        splitFiles, targetSplitSize(), splitLookback(), splitOpenFileCost());
   }
 
   @Override
   public Snapshot snapshot() {
-    return context.snapshotId() != null ?
-        ops.current().snapshot(context.snapshotId()) :
-        ops.current().currentSnapshot();
-  }
-
-  @Override
-  public boolean isCaseSensitive() {
-    return context.caseSensitive();
+    return snapshotId() != null
+        ? tableOps().current().snapshot(snapshotId())
+        : tableOps().current().currentSnapshot();
   }
 
   @Override
   public String toString() {
     return MoreObjects.toStringHelper(this)
-        .add("table", table)
+        .add("table", table())
         .add("projection", schema().asStruct())
-        .add("filter", context.rowFilter())
-        .add("ignoreResiduals", context.ignoreResiduals())
-        .add("caseSensitive", context.caseSensitive())
+        .add("filter", filter())
+        .add("ignoreResiduals", shouldIgnoreResiduals())
+        .add("caseSensitive", isCaseSensitive())
         .toString();
-  }
-
-  /**
-   * To be able to make refinements {@link #select(Collection)} and {@link #caseSensitive(boolean)} in any order,
-   * we resolve the schema to be projected lazily here.
-   *
-   * @return the Schema to project
-   */
-  private Schema lazyColumnProjection() {
-    Collection<String> selectedColumns = context.selectedColumns();
-    if (selectedColumns != null) {
-      Set<Integer> requiredFieldIds = Sets.newHashSet();
-
-      // all of the filter columns are required
-      requiredFieldIds.addAll(
-          Binder.boundReferences(schema.asStruct(),
-              Collections.singletonList(context.rowFilter()), context.caseSensitive()));
-
-      // all of the projection columns are required
-      Set<Integer> selectedIds;
-      if (context.caseSensitive()) {
-        selectedIds = TypeUtil.getProjectedIds(schema.select(selectedColumns));
-      } else {
-        selectedIds = TypeUtil.getProjectedIds(schema.caseInsensitiveSelect(selectedColumns));
-      }
-      requiredFieldIds.addAll(selectedIds);
-
-      return TypeUtil.select(schema, requiredFieldIds);
-
-    } else if (context.projectedSchema() != null) {
-      return context.projectedSchema();
-    }
-
-    return schema;
-  }
-
-  private static String formatTimestampMillis(long millis) {
-    return DATE_FORMAT.format(LocalDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneId.systemDefault()));
   }
 }

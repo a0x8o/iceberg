@@ -16,8 +16,9 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.iceberg.avro;
+
+import static org.apache.iceberg.avro.AvroSchemaUtil.toOption;
 
 import java.util.Arrays;
 import java.util.List;
@@ -27,18 +28,15 @@ import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData.Record;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
+import org.assertj.core.api.Assertions;
 import org.junit.Assert;
-
-import static org.apache.iceberg.avro.AvroSchemaUtil.toOption;
 
 class AvroTestHelpers {
 
-  private AvroTestHelpers() {
-  }
+  private AvroTestHelpers() {}
 
   static Schema.Field optionalField(int id, String name, Schema schema) {
     return addId(id, new Schema.Field(name, toOption(schema), null, JsonProperties.NULL_VALUE));
-
   }
 
   static Schema.Field requiredField(int id, String name, Schema schema) {
@@ -129,18 +127,20 @@ class AvroTestHelpers {
         Assert.assertEquals("Primitive value should be equal to expected", expected, actual);
         break;
       case STRUCT:
-        Assert.assertTrue("Expected should be a Record", expected instanceof Record);
-        Assert.assertTrue("Actual should be a Record", actual instanceof Record);
+        Assertions.assertThat(expected)
+            .as("Expected should be a Record")
+            .isInstanceOf(Record.class);
+        Assertions.assertThat(actual).as("Actual should be a Record").isInstanceOf(Record.class);
         assertEquals(type.asStructType(), (Record) expected, (Record) actual);
         break;
       case LIST:
-        Assert.assertTrue("Expected should be a List", expected instanceof List);
-        Assert.assertTrue("Actual should be a List", actual instanceof List);
+        Assertions.assertThat(expected).as("Expected should be a List").isInstanceOf(List.class);
+        Assertions.assertThat(actual).as("Actual should be a List").isInstanceOf(List.class);
         assertEquals(type.asListType(), (List) expected, (List) actual);
         break;
       case MAP:
-        Assert.assertTrue("Expected should be a Map", expected instanceof Map);
-        Assert.assertTrue("Actual should be a Map", actual instanceof Map);
+        Assertions.assertThat(expected).as("Expected should be a Map").isInstanceOf(Map.class);
+        Assertions.assertThat(actual).as("Actual should be a Map").isInstanceOf(Map.class);
         assertEquals(type.asMapType(), (Map<?, ?>) expected, (Map<?, ?>) actual);
         break;
       default:
