@@ -43,6 +43,8 @@ import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotRef;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.data.GenericRecord;
@@ -133,6 +135,20 @@ public class SimpleDataUtil {
       String filename,
       List<RowData> rows)
       throws IOException {
+    return writeFile(table, schema, spec, conf, location, filename, rows, null);
+  }
+
+  /** Write the list of {@link RowData} to the given path and with the given partition data */
+  public static DataFile writeFile(
+      Table table,
+      Schema schema,
+      PartitionSpec spec,
+      Configuration conf,
+      String location,
+      String filename,
+      List<RowData> rows,
+      StructLike partition)
+      throws IOException {
     Path path = new Path(location, filename);
     FileFormat fileFormat = FileFormat.fromFileName(filename);
     Preconditions.checkNotNull(fileFormat, "Cannot determine format for file: %s", filename);
@@ -147,10 +163,16 @@ public class SimpleDataUtil {
       closeableAppender.addAll(rows);
     }
 
-    return DataFiles.builder(spec)
-        .withInputFile(HadoopInputFile.fromPath(path, conf))
-        .withMetrics(appender.metrics())
-        .build();
+    DataFiles.Builder builder =
+        DataFiles.builder(spec)
+            .withInputFile(HadoopInputFile.fromPath(path, conf))
+            .withMetrics(appender.metrics());
+
+    if (partition != null) {
+      builder = builder.withPartition(partition);
+    }
+
+    return builder.build();
   }
 
   public static DeleteFile writeEqDeleteFile(
@@ -206,12 +228,18 @@ public class SimpleDataUtil {
     return records;
   }
 
-  public static void assertTableRows(String tablePath, List<RowData> expected) throws IOException {
-    assertTableRecords(tablePath, convertToRecords(expected));
+  public static void assertTableRows(String tablePath, List<RowData> expected, String branch)
+      throws IOException {
+    assertTableRecords(tablePath, convertToRecords(expected), branch);
   }
 
   public static void assertTableRows(Table table, List<RowData> expected) throws IOException {
-    assertTableRecords(table, convertToRecords(expected));
+    assertTableRecords(table, convertToRecords(expected), SnapshotRef.MAIN_BRANCH);
+  }
+
+  public static void assertTableRows(Table table, List<RowData> expected, String branch)
+      throws IOException {
+    assertTableRecords(table, convertToRecords(expected), branch);
   }
 
   /** Get all rows for a table */
@@ -267,13 +295,25 @@ public class SimpleDataUtil {
   }
 
   public static void assertTableRecords(Table table, List<Record> expected) throws IOException {
+    assertTableRecords(table, expected, SnapshotRef.MAIN_BRANCH);
+  }
+
+  public static void assertTableRecords(Table table, List<Record> expected, String branch)
+      throws IOException {
     table.refresh();
+    Snapshot snapshot = latestSnapshot(table, branch);
+
+    if (snapshot == null) {
+      Assert.assertEquals(expected, ImmutableList.of());
+      return;
+    }
 
     Types.StructType type = table.schema().asStruct();
     StructLikeSet expectedSet = StructLikeSet.create(type);
     expectedSet.addAll(expected);
 
-    try (CloseableIterable<Record> iterable = IcebergGenerics.read(table).build()) {
+    try (CloseableIterable<Record> iterable =
+        IcebergGenerics.read(table).useSnapshot(snapshot.snapshotId()).build()) {
       StructLikeSet actualSet = StructLikeSet.create(type);
 
       for (Record record : iterable) {
@@ -284,10 +324,27 @@ public class SimpleDataUtil {
     }
   }
 
+  // Returns the latest snapshot of the given branch in the table
+  public static Snapshot latestSnapshot(Table table, String branch) {
+    // For the main branch, currentSnapshot() is used to validate that the API behavior has
+    // not changed since that was the API used for validation prior to addition of branches.
+    if (branch.equals(SnapshotRef.MAIN_BRANCH)) {
+      return table.currentSnapshot();
+    }
+
+    return table.snapshot(branch);
+  }
+
   public static void assertTableRecords(String tablePath, List<Record> expected)
       throws IOException {
     Preconditions.checkArgument(expected != null, "expected records shouldn't be null");
-    assertTableRecords(new HadoopTables().load(tablePath), expected);
+    assertTableRecords(new HadoopTables().load(tablePath), expected, SnapshotRef.MAIN_BRANCH);
+  }
+
+  public static void assertTableRecords(String tablePath, List<Record> expected, String branch)
+      throws IOException {
+    Preconditions.checkArgument(expected != null, "expected records shouldn't be null");
+    assertTableRecords(new HadoopTables().load(tablePath), expected, branch);
   }
 
   public static StructLikeSet expectedRowSet(Table table, Record... records) {

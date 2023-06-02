@@ -39,6 +39,22 @@ public class FlinkReadConf {
     return confParser.longConf().option(FlinkReadOptions.SNAPSHOT_ID.key()).parseOptional();
   }
 
+  public String tag() {
+    return confParser.stringConf().option(FlinkReadOptions.TAG.key()).parseOptional();
+  }
+
+  public String startTag() {
+    return confParser.stringConf().option(FlinkReadOptions.START_TAG.key()).parseOptional();
+  }
+
+  public String endTag() {
+    return confParser.stringConf().option(FlinkReadOptions.END_TAG.key()).parseOptional();
+  }
+
+  public String branch() {
+    return confParser.stringConf().option(FlinkReadOptions.BRANCH.key()).parseOptional();
+  }
+
   public boolean caseSensitive() {
     return confParser
         .booleanConf()
@@ -163,6 +179,15 @@ public class FlinkReadConf {
         .intConf()
         .flinkConfig(FlinkConfigOptions.TABLE_EXEC_ICEBERG_WORKER_POOL_SIZE)
         .defaultValue(FlinkConfigOptions.TABLE_EXEC_ICEBERG_WORKER_POOL_SIZE.defaultValue())
+        .parse();
+  }
+
+  public int maxAllowedPlanningFailures() {
+    return confParser
+        .intConf()
+        .option(FlinkReadOptions.MAX_ALLOWED_PLANNING_FAILURES)
+        .flinkConfig(FlinkReadOptions.MAX_ALLOWED_PLANNING_FAILURES_OPTION)
+        .defaultValue(FlinkReadOptions.MAX_ALLOWED_PLANNING_FAILURES_OPTION.defaultValue())
         .parse();
   }
 }

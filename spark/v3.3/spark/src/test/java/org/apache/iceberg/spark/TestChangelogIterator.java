@@ -18,14 +18,21 @@
  */
 package org.apache.iceberg.spark;
 
+import static org.junit.Assert.assertThrows;
+
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import org.apache.iceberg.ChangelogOperation;
+import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -35,8 +42,16 @@ public class TestChangelogIterator extends SparkTestHelperBase {
   private static final String UPDATE_BEFORE = ChangelogOperation.UPDATE_BEFORE.name();
   private static final String UPDATE_AFTER = ChangelogOperation.UPDATE_AFTER.name();
 
-  private final int changeTypeIndex = 3;
-  private final List<Integer> identifierFieldIdx = Lists.newArrayList(0, 1);
+  private static final StructType SCHEMA =
+      new StructType(
+          new StructField[] {
+            new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
+            new StructField("name", DataTypes.StringType, false, Metadata.empty()),
+            new StructField("data", DataTypes.StringType, true, Metadata.empty()),
+            new StructField(
+                MetadataColumns.CHANGE_TYPE.name(), DataTypes.StringType, false, Metadata.empty())
+          });
+  private static final String[] IDENTIFIER_FIELDS = new String[] {"id", "name"};
 
   private enum RowType {
     DELETED,
@@ -69,7 +84,7 @@ public class TestChangelogIterator extends SparkTestHelperBase {
     }
 
     Iterator<Row> iterator =
-        ChangelogIterator.iterator(rows.iterator(), changeTypeIndex, identifierFieldIdx);
+        ChangelogIterator.computeUpdates(rows.iterator(), SCHEMA, IDENTIFIER_FIELDS);
     List<Row> result = Lists.newArrayList(iterator);
     assertEquals("Rows should match", expectedRows, rowsToJava(result));
   }
@@ -143,7 +158,7 @@ public class TestChangelogIterator extends SparkTestHelperBase {
             new GenericRowWithSchema(new Object[] {6, "name", null, INSERT}, null));
 
     Iterator<Row> iterator =
-        ChangelogIterator.iterator(rowsWithNull.iterator(), 3, Lists.newArrayList(0, 1));
+        ChangelogIterator.computeUpdates(rowsWithNull.iterator(), SCHEMA, IDENTIFIER_FIELDS);
     List<Row> result = Lists.newArrayList(iterator);
 
     assertEquals(
@@ -162,33 +177,136 @@ public class TestChangelogIterator extends SparkTestHelperBase {
   public void testUpdatedRowsWithDuplication() {
     List<Row> rowsWithDuplication =
         Lists.newArrayList(
-            // next two rows are identical
+            // two rows with same identifier fields(id, name)
             new GenericRowWithSchema(new Object[] {1, "a", "data", DELETE}, null),
             new GenericRowWithSchema(new Object[] {1, "a", "data", DELETE}, null),
-            // next two rows are identical
             new GenericRowWithSchema(new Object[] {1, "a", "new_data", INSERT}, null),
-            new GenericRowWithSchema(new Object[] {1, "a", "new_data", INSERT}, null),
-            // next two rows are identical
-            new GenericRowWithSchema(new Object[] {4, "d", "data", DELETE}, null),
-            new GenericRowWithSchema(new Object[] {4, "d", "data", DELETE}, null),
-            // next two rows are identical
-            new GenericRowWithSchema(new Object[] {4, "d", "data", INSERT}, null),
-            new GenericRowWithSchema(new Object[] {4, "d", "data", INSERT}, null));
+            new GenericRowWithSchema(new Object[] {1, "a", "new_data", INSERT}, null));
 
     Iterator<Row> iterator =
-        ChangelogIterator.iterator(
-            rowsWithDuplication.iterator(), changeTypeIndex, identifierFieldIdx);
+        ChangelogIterator.computeUpdates(rowsWithDuplication.iterator(), SCHEMA, IDENTIFIER_FIELDS);
+
+    assertThrows(
+        "Cannot compute updates because there are multiple rows with the same identifier fields([id, name]). Please make sure the rows are unique.",
+        IllegalStateException.class,
+        () -> Lists.newArrayList(iterator));
+
+    // still allow extra insert rows
+    rowsWithDuplication =
+        Lists.newArrayList(
+            new GenericRowWithSchema(new Object[] {1, "a", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "a", "new_data1", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {1, "a", "new_data2", INSERT}, null));
+
+    Iterator<Row> iterator1 =
+        ChangelogIterator.computeUpdates(rowsWithDuplication.iterator(), SCHEMA, IDENTIFIER_FIELDS);
+
+    assertEquals(
+        "Rows should match.",
+        Lists.newArrayList(
+            new Object[] {1, "a", "data", UPDATE_BEFORE},
+            new Object[] {1, "a", "new_data1", UPDATE_AFTER},
+            new Object[] {1, "a", "new_data2", INSERT}),
+        rowsToJava(Lists.newArrayList(iterator1)));
+  }
+
+  @Test
+  public void testCarryRowsRemoveWithDuplicates() {
+    // assume rows are sorted by id and change type
+    List<Row> rowsWithDuplication =
+        Lists.newArrayList(
+            // keep all delete rows for id 0 and id 1 since there is no insert row for them
+            new GenericRowWithSchema(new Object[] {0, "a", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {0, "a", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {0, "a", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "a", "old_data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "a", "old_data", DELETE}, null),
+            // the same number of delete and insert rows for id 2
+            new GenericRowWithSchema(new Object[] {2, "a", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {2, "a", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {2, "a", "data", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {2, "a", "data", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {3, "a", "new_data", INSERT}, null));
+
+    Iterator<Row> iterator =
+        ChangelogIterator.removeCarryovers(rowsWithDuplication.iterator(), SCHEMA);
+    List<Row> result = Lists.newArrayList(iterator);
+
+    assertEquals(
+        "Rows should match.",
+        Lists.newArrayList(
+            new Object[] {0, "a", "data", DELETE},
+            new Object[] {0, "a", "data", DELETE},
+            new Object[] {0, "a", "data", DELETE},
+            new Object[] {1, "a", "old_data", DELETE},
+            new Object[] {1, "a", "old_data", DELETE},
+            new Object[] {3, "a", "new_data", INSERT}),
+        rowsToJava(result));
+  }
+
+  @Test
+  public void testCarryRowsRemoveLessInsertRows() {
+    // less insert rows than delete rows
+    List<Row> rowsWithDuplication =
+        Lists.newArrayList(
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {2, "d", "data", INSERT}, null));
+
+    Iterator<Row> iterator =
+        ChangelogIterator.removeCarryovers(rowsWithDuplication.iterator(), SCHEMA);
+    List<Row> result = Lists.newArrayList(iterator);
+
+    assertEquals(
+        "Rows should match.",
+        Lists.newArrayList(
+            new Object[] {1, "d", "data", DELETE}, new Object[] {2, "d", "data", INSERT}),
+        rowsToJava(result));
+  }
+
+  @Test
+  public void testCarryRowsRemoveMoreInsertRows() {
+    List<Row> rowsWithDuplication =
+        Lists.newArrayList(
+            new GenericRowWithSchema(new Object[] {0, "d", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null),
+            // more insert rows than delete rows, should keep extra insert rows
+            new GenericRowWithSchema(new Object[] {1, "d", "data", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", INSERT}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", INSERT}, null));
+
+    Iterator<Row> iterator =
+        ChangelogIterator.removeCarryovers(rowsWithDuplication.iterator(), SCHEMA);
+    List<Row> result = Lists.newArrayList(iterator);
+
+    assertEquals(
+        "Rows should match.",
+        Lists.newArrayList(
+            new Object[] {0, "d", "data", DELETE}, new Object[] {1, "d", "data", INSERT}),
+        rowsToJava(result));
+  }
+
+  @Test
+  public void testCarryRowsRemoveNoInsertRows() {
+    // no insert row
+    List<Row> rowsWithDuplication =
+        Lists.newArrayList(
+            // next two rows are identical
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null),
+            new GenericRowWithSchema(new Object[] {1, "d", "data", DELETE}, null));
+
+    Iterator<Row> iterator =
+        ChangelogIterator.removeCarryovers(rowsWithDuplication.iterator(), SCHEMA);
     List<Row> result = Lists.newArrayList(iterator);
 
     assertEquals(
         "Duplicate rows should not be removed",
         Lists.newArrayList(
-            new Object[] {1, "a", "data", DELETE},
-            new Object[] {1, "a", "data", UPDATE_BEFORE},
-            new Object[] {1, "a", "new_data", UPDATE_AFTER},
-            new Object[] {1, "a", "new_data", INSERT},
-            new Object[] {4, "d", "data", DELETE},
-            new Object[] {4, "d", "data", INSERT}),
+            new Object[] {1, "d", "data", DELETE}, new Object[] {1, "d", "data", DELETE}),
         rowsToJava(result));
   }
 }

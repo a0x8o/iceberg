@@ -41,6 +41,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.runtime.typeutils.SortedMapTypeInfo;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.ReplacePartitions;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.Snapshot;
@@ -48,6 +49,7 @@ import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.base.Strings;
@@ -95,6 +97,7 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
   // The completed files cache for current checkpoint. Once the snapshot barrier received, it will
   // be flushed to the 'dataFilesPerCheckpoint'.
   private final List<WriteResult> writeResultsOfCurrentCkpt = Lists.newArrayList();
+  private final String branch;
 
   // It will have an unique identifier for one job.
   private transient String flinkJobId;
@@ -119,17 +122,22 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
   private transient ListState<SortedMap<Long, byte[]>> checkpointsState;
 
   private final Integer workerPoolSize;
+  private final PartitionSpec spec;
   private transient ExecutorService workerPool;
 
   IcebergFilesCommitter(
       TableLoader tableLoader,
       boolean replacePartitions,
       Map<String, String> snapshotProperties,
-      Integer workerPoolSize) {
+      Integer workerPoolSize,
+      String branch,
+      PartitionSpec spec) {
     this.tableLoader = tableLoader;
     this.replacePartitions = replacePartitions;
     this.snapshotProperties = snapshotProperties;
     this.workerPoolSize = workerPoolSize;
+    this.branch = branch;
+    this.spec = spec;
   }
 
   @Override
@@ -179,7 +187,7 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
       // it's safe to assign the max committed checkpoint id from restored flink job to the current
       // flink job.
       this.maxCommittedCheckpointId =
-          getMaxCommittedCheckpointId(table, restoredFlinkJobId, operatorUniqueId);
+          getMaxCommittedCheckpointId(table, restoredFlinkJobId, operatorUniqueId, branch);
 
       NavigableMap<Long, byte[]> uncommittedDataFiles =
           Maps.newTreeMap(checkpointsState.get().iterator().next())
@@ -230,6 +238,7 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
     // the files,
     // Besides, we need to maintain the max-committed-checkpoint-id to be increasing.
     if (checkpointId > maxCommittedCheckpointId) {
+      LOG.info("Checkpoint {} completed. Attempting commit.", checkpointId);
       commitUpToCheckpoint(dataFilesPerCheckpoint, flinkJobId, operatorUniqueId, checkpointId);
       this.maxCommittedCheckpointId = checkpointId;
     } else {
@@ -259,7 +268,8 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
           SimpleVersionedSerialization.readVersionAndDeSerialize(
               DeltaManifestsSerializer.INSTANCE, e.getValue());
       pendingResults.put(
-          e.getKey(), FlinkManifestUtil.readCompletedFiles(deltaManifests, table.io()));
+          e.getKey(),
+          FlinkManifestUtil.readCompletedFiles(deltaManifests, table.io(), table.specs()));
       manifests.addAll(deltaManifests.manifests());
     }
 
@@ -285,6 +295,8 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
         commitDeltaTxn(pendingResults, summary, newFlinkJobId, operatorId, checkpointId);
       }
       continuousEmptyCheckpoints = 0;
+    } else {
+      LOG.info("Skip commit for checkpoint {} due to no data files or delete files.", checkpointId);
     }
   }
 
@@ -383,10 +395,11 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
       String operatorId,
       long checkpointId) {
     LOG.info(
-        "Committing {} for checkpoint {} to table {} with summary: {}",
+        "Committing {} for checkpoint {} to table {} branch {} with summary: {}",
         description,
         checkpointId,
         table.name(),
+        branch,
         summary);
     snapshotProperties.forEach(operation::set);
     // custom snapshot metadata properties will be overridden if they conflict with internal ones
@@ -394,14 +407,16 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
     operation.set(MAX_COMMITTED_CHECKPOINT_ID, Long.toString(checkpointId));
     operation.set(FLINK_JOB_ID, newFlinkJobId);
     operation.set(OPERATOR_ID, operatorId);
+    operation.toBranch(branch);
 
     long startNano = System.nanoTime();
     operation.commit(); // abort is automatically called if this fails.
     long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNano);
     LOG.info(
-        "Committed {} to table: {}, checkpointId {} in {} ms",
+        "Committed {} to table: {}, branch: {}, checkpointId {} in {} ms",
         description,
         table.name(),
+        branch,
         checkpointId,
         durationMs);
     committerMetrics.commitDuration(durationMs);
@@ -434,7 +449,7 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
     WriteResult result = WriteResult.builder().addAll(writeResultsOfCurrentCkpt).build();
     DeltaManifests deltaManifests =
         FlinkManifestUtil.writeCompletedFiles(
-            result, () -> manifestOutputFileFactory.create(checkpointId), table.spec());
+            result, () -> manifestOutputFileFactory.create(checkpointId), spec);
 
     return SimpleVersionedSerialization.writeVersionAndSerialize(
         DeltaManifestsSerializer.INSTANCE, deltaManifests);
@@ -460,7 +475,8 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
     }
   }
 
-  private static ListStateDescriptor<SortedMap<Long, byte[]>> buildStateDescriptor() {
+  @VisibleForTesting
+  static ListStateDescriptor<SortedMap<Long, byte[]>> buildStateDescriptor() {
     Comparator<Long> longComparator = Comparators.forType(Types.LongType.get());
     // Construct a SortedMapTypeInfo.
     SortedMapTypeInfo<Long, byte[]> sortedMapTypeInfo =
@@ -471,8 +487,9 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
     return new ListStateDescriptor<>("iceberg-files-committer-state", sortedMapTypeInfo);
   }
 
-  static long getMaxCommittedCheckpointId(Table table, String flinkJobId, String operatorId) {
-    Snapshot snapshot = table.currentSnapshot();
+  static long getMaxCommittedCheckpointId(
+      Table table, String flinkJobId, String operatorId, String branch) {
+    Snapshot snapshot = table.snapshot(branch);
     long lastCommittedCheckpointId = INITIAL_CHECKPOINT_ID;
 
     while (snapshot != null) {
