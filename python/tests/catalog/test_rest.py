@@ -408,7 +408,8 @@ def test_load_table_200(rest_mock: Mocker) -> None:
         status_code=200,
         request_headers=TEST_HEADERS,
     )
-    actual = RestCatalog("rest", uri=TEST_URI, token=TEST_TOKEN).load_table(("fokko", "table"))
+    catalog = RestCatalog("rest", uri=TEST_URI, token=TEST_TOKEN)
+    actual = catalog.load_table(("fokko", "table"))
     expected = Table(
         identifier=("rest", "fokko", "table"),
         metadata_location="s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
@@ -439,7 +440,7 @@ def test_load_table_200(rest_mock: Mocker) -> None:
                     manifest_list="s3://warehouse/database/table/metadata/snap-3497810964824022504-1-c4f68204-666b-4e50-a9df-b10c34bf6b82.avro",
                     summary=Summary(
                         operation=Operation.APPEND,
-                        **{  # type: ignore
+                        **{
                             "spark.app.id": "local-1646787004168",
                             "added-data-files": "1",
                             "added-records": "1",
@@ -484,7 +485,10 @@ def test_load_table_200(rest_mock: Mocker) -> None:
             partition_spec=[],
         ),
         io=load_file_io(),
+        catalog=catalog,
     )
+    # First compare the dicts
+    assert actual.metadata.model_dump() == expected.metadata.model_dump()
     assert actual == expected
 
 
@@ -585,7 +589,8 @@ def test_create_table_200(rest_mock: Mocker, table_schema_simple: Schema) -> Non
         status_code=200,
         request_headers=TEST_HEADERS,
     )
-    table = RestCatalog("rest", uri=TEST_URI, token=TEST_TOKEN).create_table(
+    catalog = RestCatalog("rest", uri=TEST_URI, token=TEST_TOKEN)
+    actual = catalog.create_table(
         identifier=("fokko", "fokko2"),
         schema=table_schema_simple,
         location=None,
@@ -595,7 +600,7 @@ def test_create_table_200(rest_mock: Mocker, table_schema_simple: Schema) -> Non
         sort_order=SortOrder(SortField(source_id=2, transform=IdentityTransform())),
         properties={"owner": "fokko"},
     )
-    assert table == Table(
+    expected = Table(
         identifier=("rest", "fokko", "fokko2"),
         metadata_location="s3://warehouse/database/table/metadata.json",
         metadata=TableMetadataV1(
@@ -639,7 +644,9 @@ def test_create_table_200(rest_mock: Mocker, table_schema_simple: Schema) -> Non
             partition_spec=[],
         ),
         io=load_file_io(),
+        catalog=catalog,
     )
+    assert actual == expected
 
 
 def test_create_table_409(rest_mock: Mocker, table_schema_simple: Schema) -> None:

@@ -15,9 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint:disable=redefined-outer-name
-from typing import Any, Dict
+from typing import Dict
 
 import pytest
+from sortedcontainers import SortedList
 
 from pyiceberg.expressions import (
     AlwaysTrue,
@@ -25,12 +26,24 @@ from pyiceberg.expressions import (
     EqualTo,
     In,
 )
-from pyiceberg.io import PY_IO_IMPL, load_file_io
-from pyiceberg.manifest import DataFile, ManifestContent
+from pyiceberg.io import PY_IO_IMPL
+from pyiceberg.manifest import (
+    DataFile,
+    DataFileContent,
+    FileFormat,
+    ManifestEntry,
+    ManifestEntryStatus,
+)
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
-from pyiceberg.table import StaticTable, Table, _check_content
-from pyiceberg.table.metadata import TableMetadataV2
+from pyiceberg.table import (
+    SetPropertiesUpdate,
+    StaticTable,
+    Table,
+    UpdateSchema,
+    _match_deletes_to_datafile,
+)
+from pyiceberg.table.metadata import INITIAL_SEQUENCE_NUMBER
 from pyiceberg.table.snapshots import (
     Operation,
     Snapshot,
@@ -44,24 +57,25 @@ from pyiceberg.table.sorting import (
     SortOrder,
 )
 from pyiceberg.transforms import BucketTransform, IdentityTransform
-from pyiceberg.typedef import Record
-from pyiceberg.types import LongType, NestedField
-
-
-@pytest.fixture
-def table(example_table_metadata_v2: Dict[str, Any]) -> Table:
-    table_metadata = TableMetadataV2(**example_table_metadata_v2)
-    return Table(
-        identifier=("database", "table"),
-        metadata=table_metadata,
-        metadata_location=f"{table_metadata.location}/uuid.metadata.json",
-        io=load_file_io(),
-    )
-
-
-@pytest.fixture
-def static_table(metadata_location: str) -> StaticTable:
-    return StaticTable.from_metadata(metadata_location)
+from pyiceberg.types import (
+    BinaryType,
+    BooleanType,
+    DateType,
+    DoubleType,
+    FloatType,
+    IntegerType,
+    ListType,
+    LongType,
+    MapType,
+    NestedField,
+    PrimitiveType,
+    StringType,
+    StructType,
+    TimestampType,
+    TimestamptzType,
+    TimeType,
+    UUIDType,
+)
 
 
 def test_schema(table: Table) -> None:
@@ -181,8 +195,8 @@ def test_snapshot_by_name_does_not_exist(table: Table) -> None:
 
 def test_history(table: Table) -> None:
     assert table.history() == [
-        SnapshotLogEntry(snapshot_id="3051729675574597004", timestamp_ms=1515100955770),
-        SnapshotLogEntry(snapshot_id="3055729675574597004", timestamp_ms=1555100955770),
+        SnapshotLogEntry(snapshot_id=3051729675574597004, timestamp_ms=1515100955770),
+        SnapshotLogEntry(snapshot_id=3055729675574597004, timestamp_ms=1555100955770),
     ]
 
 
@@ -252,27 +266,14 @@ def test_table_scan_projection_unknown_column(table: Table) -> None:
     assert "Could not find column: 'a'" in str(exc_info.value)
 
 
-def test_check_content_deletes() -> None:
-    with pytest.raises(ValueError) as exc_info:
-        _check_content(
-            DataFile(
-                content=ManifestContent.DELETES,
-            )
-        )
-    assert "PyIceberg does not support deletes: https://github.com/apache/iceberg/issues/6568" in str(exc_info.value)
+def test_static_table_same_as_table(table: Table, metadata_location: str) -> None:
+    static_table = StaticTable.from_metadata(metadata_location)
+    assert isinstance(static_table, Table)
+    assert static_table.metadata == table.metadata
 
 
-def test_check_content_data() -> None:
-    manifest_file = DataFile(content=ManifestContent.DATA)
-    assert _check_content(manifest_file) == manifest_file
-
-
-def test_check_content_missing_attr() -> None:
-    r = Record(*([None] * 15))
-    assert _check_content(r) == r  # type: ignore
-
-
-def test_static_table_same_as_table(table: Table, static_table: StaticTable) -> None:
+def test_static_table_gz_same_as_table(table: Table, metadata_location_gz: str) -> None:
+    static_table = StaticTable.from_metadata(metadata_location_gz)
     assert isinstance(static_table, Table)
     assert static_table.metadata == table.metadata
 
@@ -280,3 +281,289 @@ def test_static_table_same_as_table(table: Table, static_table: StaticTable) -> 
 def test_static_table_io_does_not_exist(metadata_location: str) -> None:
     with pytest.raises(ValueError):
         StaticTable.from_metadata(metadata_location, {PY_IO_IMPL: "pyiceberg.does.not.exist.FileIO"})
+
+
+def test_match_deletes_to_datafile() -> None:
+    data_entry = ManifestEntry(
+        status=ManifestEntryStatus.ADDED,
+        sequence_number=1,
+        data_file=DataFile(
+            content=DataFileContent.DATA,
+            file_path="s3://bucket/0000.parquet",
+            file_format=FileFormat.PARQUET,
+            partition={},
+            record_count=3,
+            file_size_in_bytes=3,
+        ),
+    )
+    delete_entry_1 = ManifestEntry(
+        status=ManifestEntryStatus.ADDED,
+        sequence_number=0,  # Older than the data
+        data_file=DataFile(
+            content=DataFileContent.POSITION_DELETES,
+            file_path="s3://bucket/0001-delete.parquet",
+            file_format=FileFormat.PARQUET,
+            partition={},
+            record_count=3,
+            file_size_in_bytes=3,
+        ),
+    )
+    delete_entry_2 = ManifestEntry(
+        status=ManifestEntryStatus.ADDED,
+        sequence_number=3,
+        data_file=DataFile(
+            content=DataFileContent.POSITION_DELETES,
+            file_path="s3://bucket/0002-delete.parquet",
+            file_format=FileFormat.PARQUET,
+            partition={},
+            record_count=3,
+            file_size_in_bytes=3,
+            # We don't really care about the tests here
+            value_counts={},
+            null_value_counts={},
+            nan_value_counts={},
+            lower_bounds={},
+            upper_bounds={},
+        ),
+    )
+    assert _match_deletes_to_datafile(
+        data_entry,
+        SortedList(iterable=[delete_entry_1, delete_entry_2], key=lambda entry: entry.sequence_number or INITIAL_SEQUENCE_NUMBER),
+    ) == {
+        delete_entry_2.data_file,
+    }
+
+
+def test_match_deletes_to_datafile_duplicate_number() -> None:
+    data_entry = ManifestEntry(
+        status=ManifestEntryStatus.ADDED,
+        sequence_number=1,
+        data_file=DataFile(
+            content=DataFileContent.DATA,
+            file_path="s3://bucket/0000.parquet",
+            file_format=FileFormat.PARQUET,
+            partition={},
+            record_count=3,
+            file_size_in_bytes=3,
+        ),
+    )
+    delete_entry_1 = ManifestEntry(
+        status=ManifestEntryStatus.ADDED,
+        sequence_number=3,
+        data_file=DataFile(
+            content=DataFileContent.POSITION_DELETES,
+            file_path="s3://bucket/0001-delete.parquet",
+            file_format=FileFormat.PARQUET,
+            partition={},
+            record_count=3,
+            file_size_in_bytes=3,
+            # We don't really care about the tests here
+            value_counts={},
+            null_value_counts={},
+            nan_value_counts={},
+            lower_bounds={},
+            upper_bounds={},
+        ),
+    )
+    delete_entry_2 = ManifestEntry(
+        status=ManifestEntryStatus.ADDED,
+        sequence_number=3,
+        data_file=DataFile(
+            content=DataFileContent.POSITION_DELETES,
+            file_path="s3://bucket/0002-delete.parquet",
+            file_format=FileFormat.PARQUET,
+            partition={},
+            record_count=3,
+            file_size_in_bytes=3,
+            # We don't really care about the tests here
+            value_counts={},
+            null_value_counts={},
+            nan_value_counts={},
+            lower_bounds={},
+            upper_bounds={},
+        ),
+    )
+    assert _match_deletes_to_datafile(
+        data_entry,
+        SortedList(iterable=[delete_entry_1, delete_entry_2], key=lambda entry: entry.sequence_number or INITIAL_SEQUENCE_NUMBER),
+    ) == {
+        delete_entry_1.data_file,
+        delete_entry_2.data_file,
+    }
+
+
+def test_serialize_set_properties_updates() -> None:
+    assert SetPropertiesUpdate(updates={"abc": "🤪"}).model_dump_json() == """{"action":"set-properties","updates":{"abc":"🤪"}}"""
+
+
+def test_add_column(table_schema_simple: Schema, table: Table) -> None:
+    update = UpdateSchema(table_schema_simple, table)
+    update.add_column(name="b", type_var=IntegerType())
+    apply_schema: Schema = update._apply()  # pylint: disable=W0212
+    assert len(apply_schema.fields) == 4
+
+    assert apply_schema == Schema(
+        NestedField(field_id=1, name="foo", field_type=StringType(), required=False),
+        NestedField(field_id=2, name="bar", field_type=IntegerType(), required=True),
+        NestedField(field_id=3, name="baz", field_type=BooleanType(), required=False),
+        NestedField(field_id=4, name="b", field_type=IntegerType(), required=False),
+    )
+    assert apply_schema.schema_id == 0
+    assert apply_schema.highest_field_id == 4
+
+
+def test_add_primitive_type_column(table_schema_simple: Schema, table: Table) -> None:
+    primitive_type: Dict[str, PrimitiveType] = {
+        "boolean": BooleanType(),
+        "int": IntegerType(),
+        "long": LongType(),
+        "float": FloatType(),
+        "double": DoubleType(),
+        "date": DateType(),
+        "time": TimeType(),
+        "timestamp": TimestampType(),
+        "timestamptz": TimestamptzType(),
+        "string": StringType(),
+        "uuid": UUIDType(),
+        "binary": BinaryType(),
+    }
+
+    for name, type_ in primitive_type.items():
+        field_name = f"new_column_{name}"
+        update = UpdateSchema(table_schema_simple, table)
+        update.add_column(parent=None, name=field_name, type_var=type_, doc=f"new_column_{name}")
+        new_schema = update._apply()  # pylint: disable=W0212
+
+        field: NestedField = new_schema.find_field(field_name)
+        assert field.field_type == type_
+        assert field.doc == f"new_column_{name}"
+
+
+def test_add_nested_type_column(table_schema_simple: Schema, table: Table) -> None:
+    # add struct type column
+    field_name = "new_column_struct"
+    update = UpdateSchema(table_schema_simple, table)
+    struct_ = StructType(
+        NestedField(1, "lat", DoubleType()),
+        NestedField(2, "long", DoubleType()),
+    )
+    update.add_column(parent=None, name=field_name, type_var=struct_)
+    schema_ = update._apply()  # pylint: disable=W0212
+    field: NestedField = schema_.find_field(field_name)
+    assert field.field_type == StructType(
+        NestedField(5, "lat", DoubleType()),
+        NestedField(6, "long", DoubleType()),
+    )
+    assert schema_.highest_field_id == 6
+
+
+def test_add_nested_map_type_column(table_schema_simple: Schema, table: Table) -> None:
+    # add map type column
+    field_name = "new_column_map"
+    update = UpdateSchema(table_schema_simple, table)
+    map_ = MapType(1, StringType(), 2, IntegerType(), False)
+    update.add_column(parent=None, name=field_name, type_var=map_)
+    new_schema = update._apply()  # pylint: disable=W0212
+    field: NestedField = new_schema.find_field(field_name)
+    assert field.field_type == MapType(5, StringType(), 6, IntegerType(), False)
+    assert new_schema.highest_field_id == 6
+
+
+def test_add_nested_list_type_column(table_schema_simple: Schema, table: Table) -> None:
+    # add list type column
+    field_name = "new_column_list"
+    update = UpdateSchema(table_schema_simple, table)
+    list_ = ListType(
+        element_id=101,
+        element_type=StructType(
+            NestedField(102, "lat", DoubleType()),
+            NestedField(103, "long", DoubleType()),
+        ),
+        element_required=False,
+    )
+    update.add_column(parent=None, name=field_name, type_var=list_)
+    new_schema = update._apply()  # pylint: disable=W0212
+    field: NestedField = new_schema.find_field(field_name)
+    assert field.field_type == ListType(
+        element_id=5,
+        element_type=StructType(
+            NestedField(6, "lat", DoubleType()),
+            NestedField(7, "long", DoubleType()),
+        ),
+        element_required=False,
+    )
+    assert new_schema.highest_field_id == 7
+
+
+def test_add_field_to_map_key(table_schema_nested_with_struct_key_map: Schema, table: Table) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        update = UpdateSchema(table_schema_nested_with_struct_key_map, table)
+        update.add_column(name="b", type_var=IntegerType(), parent="location.key")._apply()  # pylint: disable=W0212
+    assert "Cannot add fields to map keys" in str(exc_info.value)
+
+
+def test_add_already_exists(table_schema_nested: Schema, table: Table) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        update = UpdateSchema(table_schema_nested, table)
+        update.add_column("foo", IntegerType())
+    assert "already exists: foo" in str(exc_info.value)
+
+    with pytest.raises(ValueError) as exc_info:
+        update = UpdateSchema(table_schema_nested, table)
+        update.add_column(name="latitude", type_var=IntegerType(), parent="location")
+    assert "already exists: location.lat" in str(exc_info.value)
+
+
+def test_add_to_non_struct_type(table_schema_simple: Schema, table: Table) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        update = UpdateSchema(table_schema_simple, table)
+        update.add_column(name="lat", type_var=IntegerType(), parent="foo")
+    assert "Cannot add column to non-struct type" in str(exc_info.value)
+
+
+def test_add_required_column(table: Table) -> None:
+    schema_ = Schema(
+        NestedField(field_id=1, name="a", field_type=BooleanType(), required=False), schema_id=1, identifier_field_ids=[]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        update = UpdateSchema(schema_, table)
+        update.add_column(name="data", type_var=IntegerType(), required=True)
+    assert "Incompatible change: cannot add required column: data" in str(exc_info.value)
+
+    new_schema = (
+        UpdateSchema(schema_, table)  # pylint: disable=W0212
+        .allow_incompatible_changes()
+        .add_column(name="data", type_var=IntegerType(), required=True)
+        ._apply()
+    )
+    assert new_schema == Schema(
+        NestedField(field_id=1, name="a", field_type=BooleanType(), required=False),
+        NestedField(field_id=2, name="data", field_type=IntegerType(), required=True),
+        schema_id=0,
+        identifier_field_ids=[],
+    )
+
+
+def test_add_required_column_case_insensitive(table: Table) -> None:
+    schema_ = Schema(
+        NestedField(field_id=1, name="id", field_type=BooleanType(), required=False), schema_id=1, identifier_field_ids=[]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        update = UpdateSchema(schema_, table)
+        update.allow_incompatible_changes().case_sensitive(False).add_column(name="ID", type_var=IntegerType(), required=True)
+    assert "already exists: ID" in str(exc_info.value)
+
+    new_schema = (
+        UpdateSchema(schema_, table)  # pylint: disable=W0212
+        .allow_incompatible_changes()
+        .add_column(name="ID", type_var=IntegerType(), required=True)
+        ._apply()
+    )
+    assert new_schema == Schema(
+        NestedField(field_id=1, name="id", field_type=BooleanType(), required=False),
+        NestedField(field_id=2, name="ID", field_type=IntegerType(), required=True),
+        schema_id=0,
+        identifier_field_ids=[],
+    )

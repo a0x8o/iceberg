@@ -53,6 +53,11 @@ public class BaseFileScanTask extends BaseContentScanTask<FileScanTask, DataFile
     return ImmutableList.copyOf(deletes);
   }
 
+  @Override
+  public Schema schema() {
+    return super.schema();
+  }
+
   @VisibleForTesting
   static final class SplitScanTask implements FileScanTask, MergeableScanTask<SplitScanTask> {
     private final long len;
@@ -76,6 +81,11 @@ public class BaseFileScanTask extends BaseContentScanTask<FileScanTask, DataFile
     }
 
     @Override
+    public Schema schema() {
+      return fileScanTask.schema();
+    }
+
+    @Override
     public PartitionSpec spec() {
       return fileScanTask.spec();
     }
@@ -88,6 +98,11 @@ public class BaseFileScanTask extends BaseContentScanTask<FileScanTask, DataFile
     @Override
     public long length() {
       return len;
+    }
+
+    @Override
+    public long estimatedRowsCount() {
+      return BaseContentScanTask.estimateRowsCount(len, fileScanTask.file());
     }
 
     @Override
