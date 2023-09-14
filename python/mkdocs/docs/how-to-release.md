@@ -84,7 +84,7 @@ Go to Github Actions and run the `Python release` action. Set the version of the
 Next step is to upload them to pypi. Please keep in mind that this **won't** bump the version for everyone that hasn't pinned their version, since it is set to an RC [pre-release and those are ignored](https://packaging.python.org/en/latest/guides/distributing-packages-using-setuptools/#pre-release-versioning).
 
 ```bash
-twine upload -s release-0.5.0rc1/*
+twine upload -s release-0.1.0rc1/*
 ```
 
 Final step is to generate the email to the dev mail list:
